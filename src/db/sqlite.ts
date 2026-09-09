@@ -6,6 +6,12 @@ import {
 } from '@capacitor-community/sqlite'
 import { DB_NAME, DB_VERSION, MIGRATION_STATEMENTS, SCHEMA_STATEMENTS } from './schema'
 
+/** Minimal shape of the <jeep-sqlite> custom element methods this file calls
+ * directly (its own type declarations don't cover this internal method). */
+interface JeepSqliteElement extends HTMLElement {
+  isStoreOpen: () => Promise<boolean>
+}
+
 /**
  * One SQLite connection for the whole app, opened lazily on first use and
  * cached. Works the same way on web (jeep-sqlite/IndexedDB, set up in
@@ -17,6 +23,50 @@ const sqliteConnection = new SQLiteConnection(CapacitorSQLite)
 let dbPromise: Promise<SQLiteDBConnection> | null = null
 let webStoreReady: Promise<void> | null = null
 
+/**
+ * Polls the <jeep-sqlite> element's own isStoreOpen() until it reports true
+ * (or a timeout elapses).
+ *
+ * Why this is needed: jeep-sqlite's connectedCallback() kicks off opening
+ * its IndexedDB-backed store (`this.openStore(...).then(mStore => this.isStore
+ * = mStore)`) WITHOUT awaiting it - isStoreOpen() just returns whatever
+ * `this.isStore` happens to be at the instant it's called, with no retry of
+ * its own. @capacitor-community/sqlite's initWebStore() calls isStoreOpen()
+ * exactly once and trusts the result, so if that snapshot lands before the
+ * store has actually finished opening, nothing downstream ever notices or
+ * retries - createConnection()/open() only check the *live* isStore flag
+ * (which usually has flipped true by then, so no error is thrown), but the
+ * underlying Database.open() call can still end up resolving against a
+ * store handle that isn't yet wired to the real persisted data, silently
+ * opening a fresh, empty in-memory database instead of the real one.
+ *
+ * Symptom this fixes, confirmed by direct reproduction: after logging in
+ * and syncing down jobs, closing the app and reopening it intermittently
+ * showed an empty job list - even though the actual IndexedDB blob for the
+ * database was independently verified (by loading its raw bytes into a
+ * throwaway sql.js instance) to still contain the real, correct rows the
+ * whole time. The data was never lost; the app just occasionally opened
+ * past it. Explicitly waiting for a true isStoreOpen() before doing
+ * anything else closes that window.
+ */
+async function waitForJeepSqliteStore(timeoutMs = 5000): Promise<void> {
+  const el = document.querySelector('jeep-sqlite') as JeepSqliteElement | null
+  if (!el) {
+    return
+  }
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    try {
+      if (await el.isStoreOpen()) {
+        return
+      }
+    } catch {
+      // Element not fully upgraded yet - keep polling until the timeout.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+}
+
 async function ensureWebStore(): Promise<void> {
   if (Capacitor.getPlatform() !== 'web') {
     return
@@ -24,6 +74,7 @@ async function ensureWebStore(): Promise<void> {
   if (!webStoreReady) {
     webStoreReady = (async () => {
       await customElements.whenDefined('jeep-sqlite')
+      await waitForJeepSqliteStore()
       await sqliteConnection.initWebStore()
     })()
   }
