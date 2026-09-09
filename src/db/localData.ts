@@ -1,4 +1,5 @@
-import { getDb } from './sqlite'
+import { getDb, persist } from './sqlite'
+import { syncUp } from '../api/syncV2'
 import type {
   SyncV2AssetDto,
   SyncV2AssetPropertyDto,
@@ -9,7 +10,7 @@ import type {
   SyncV2SiteDto,
 } from '../api/syncV2Types'
 
-export type LocalJobStatus = 'open' | 'wip' | 'completed'
+export type LocalJobStatus = 'open' | 'wip' | 'paused' | 'completed'
 
 export interface LocalJob {
   serRecId: number
@@ -180,6 +181,90 @@ export interface LocalAssetProperty {
   assetServiceGuid: string | null
   localModified: boolean
   localCreated: boolean
+}
+
+/**
+ * One row of dynamic values captured for an asset SERVICE VISIT (as opposed
+ * to LocalAssetProperty's legacy master row) - a header row (type === 0) or
+ * one of possibly many detail/grid rows (type === 1), scoped to one
+ * asset_service_history visit via serviceHisId. See schema.ts's
+ * asset_service_history/asset_service_properties tables and
+ * saveAssetServiceVisit below.
+ */
+export interface LocalAssetServiceProperty {
+  localId: string
+  serviceHisId: string
+  assetPropId: number | null
+  type: number | null
+  /** Toggled directly from the Devices list, independent of the edit popup -
+   * see AssetServiceInfoPage.tsx. No legacy-master equivalent (asset_properties
+   * has no such column), so this never round-trips through fromMasterProperty. */
+  serviceFlag: boolean
+  value1: string | null
+  value2: string | null
+  value3: string | null
+  value4: string | null
+  value5: string | null
+  value6: string | null
+  value7: string | null
+  value8: string | null
+  value9: string | null
+  value10: string | null
+  value11: string | null
+  value12: string | null
+  value13: string | null
+  value14: string | null
+  value15: string | null
+  value16: string | null
+  value17: string | null
+  value18: string | null
+  value19: string | null
+  value20: string | null
+  value21: string | null
+  value22: string | null
+  value23: string | null
+  value24: string | null
+  value25: string | null
+  value26: string | null
+  value27: string | null
+  value28: string | null
+  value29: string | null
+  value30: string | null
+  value31: string | null
+  value32: string | null
+  value33: string | null
+  value34: string | null
+  value35: string | null
+  value36: string | null
+  value37: string | null
+  value38: string | null
+  value39: string | null
+  value40: string | null
+  value41: string | null
+  value42: string | null
+  value43: string | null
+  value44: string | null
+  value45: string | null
+  value46: string | null
+  value47: string | null
+  value48: string | null
+  value49: string | null
+  value50: string | null
+}
+
+/** The header (history) row for one asset service visit - see schema.ts's asset_service_history table. */
+export interface LocalAssetServiceHistory {
+  serviceHisId: string
+  assetGuid: string
+  serRecId: number
+  serviceDate: string | null
+  status: number | null
+  synced: boolean
+}
+
+export interface LocalAssetServiceVisit {
+  history: LocalAssetServiceHistory
+  properties: LocalAssetServiceProperty[]
 }
 
 /** value1..value50 - shared by the asset_properties column list and the
@@ -455,6 +540,8 @@ export async function upsertSyncData(data: SyncV2ResponseDto): Promise<void> {
     }
     throw err
   }
+
+  await persist()
 }
 
 export async function getLastSyncAt(): Promise<string | null> {
@@ -492,6 +579,21 @@ export async function getWipJob(): Promise<LocalJob | null> {
 export async function startJob(serRecId: number): Promise<void> {
   const db = await getDb()
   await db.run("UPDATE jobs SET local_status = 'wip' WHERE serRecId = ?", [serRecId])
+  await persist()
+}
+
+/**
+ * Marks a job paused locally - it stays out of 'completed' (so getOpenJobs
+ * keeps showing it) but is no longer 'wip' (so getWipJob's "only one job in
+ * progress at a time" lock frees up, letting another job be started).
+ * Resuming a paused job reuses the existing startJob() above - same as this
+ * app has never had a separate "resume" server call, only Complete/Pause
+ * explicitly mutate the server's DispatchStatus.
+ */
+export async function pauseJobLocally(serRecId: number): Promise<void> {
+  const db = await getDb()
+  await db.run("UPDATE jobs SET local_status = 'paused' WHERE serRecId = ?", [serRecId])
+  await persist()
 }
 
 export async function markJobCompletedLocally(serRecId: number): Promise<void> {
@@ -500,6 +602,7 @@ export async function markJobCompletedLocally(serRecId: number): Promise<void> {
     "UPDATE jobs SET local_status = 'completed', local_completed_at = ? WHERE serRecId = ?",
     [new Date().toISOString(), serRecId],
   )
+  await persist()
 }
 
 export async function getSiteById(siteId: number): Promise<LocalSite | null> {
@@ -622,6 +725,302 @@ export async function saveAssetProperties(
     }
     throw err
   }
+
+  await persist()
+}
+
+/** Seeds a new asset-service-visit draft row from a legacy master AssetProperties
+ * row - used when the technician opens the service screen for a (asset, job)
+ * pair that has no saved visit yet, so the form starts from the asset's
+ * last-known values instead of blank (per "take the asset property details
+ * to show in service screen"). A fresh localId/serviceHisId is assigned -
+ * this is only ever a starting point for a NEW asset_service_properties row,
+ * never a reference back to the master row it was copied from (beyond
+ * carrying over its assetPropId, so saving amends that same master row
+ * rather than creating a duplicate). */
+export function fromMasterProperty(master: LocalAssetProperty): LocalAssetServiceProperty {
+  const row = {
+    localId: `local-${crypto.randomUUID()}`,
+    serviceHisId: '',
+    assetPropId: master.assetPropId,
+    type: master.type,
+    // The master row has no serviced/not-serviced concept - always starts
+    // unserviced for a freshly-seeded visit row.
+    serviceFlag: false,
+  } as LocalAssetServiceProperty
+  for (const col of VALUE_COLUMNS) {
+    ;(row as unknown as Record<string, string | null>)[col] = (
+      master as unknown as Record<string, string | null>
+    )[col]
+  }
+  return row
+}
+
+/** A fresh, unpersisted row for "add a new header/detail row" to an asset service visit. */
+export function createBlankAssetServicePropertyRow(type: number): LocalAssetServiceProperty {
+  const row = {
+    localId: `local-${crypto.randomUUID()}`,
+    serviceHisId: '',
+    assetPropId: null,
+    type,
+    serviceFlag: false,
+  } as LocalAssetServiceProperty
+  for (const col of VALUE_COLUMNS) {
+    ;(row as unknown as Record<string, string | null>)[col] = null
+  }
+  return row
+}
+
+/**
+ * The existing local visit (history + its property rows) for a (assetGuid,
+ * serRecId) pair, if the technician has saved one before - whether already
+ * pushed to the server or still pending. Returns null if no visit has ever
+ * been saved locally for this pair.
+ */
+export async function getServiceVisit(
+  assetGuid: string,
+  serRecId: number,
+): Promise<LocalAssetServiceVisit | null> {
+  const db = await getDb()
+  const historyRes = await db.query(
+    'SELECT * FROM asset_service_history WHERE assetGuid = ? AND serRecId = ?',
+    [assetGuid, serRecId],
+  )
+  const historyRows = rowsOf<Record<string, unknown>>(historyRes)
+  if (historyRows.length === 0) return null
+
+  const history = mapAssetServiceHistoryRow(historyRows[0])
+  const propsRes = await db.query('SELECT * FROM asset_service_properties WHERE serviceHisId = ?', [
+    history.serviceHisId,
+  ])
+  const properties = rowsOf<Record<string, unknown>>(propsRes).map(mapAssetServicePropertyRow)
+
+  return { history, properties }
+}
+
+/**
+ * Finds or creates the asset_service_history row for this (assetGuid,
+ * serRecId) visit and full-replaces its asset_service_properties rows with
+ * `header` + `details` - the "Save" button on AssetServiceInfoPage.
+ * ServiceHisId is reused across repeated saves of the same visit ("one
+ * history entry per job+asset, updated in place" - confirmed with the user)
+ * rather than creating a new history row every time.
+ *
+ * Always resets `synced` back to 0, even for a visit that had already been
+ * pushed up successfully - any edit after a sync must go up again on the
+ * next manual Sync (see UtilitiesPage.handleSync / applyAssetServiceUpResults).
+ *
+ * Returns the resolved serviceHisId (useful for tests/diagnostics; the page
+ * itself doesn't need to keep it since it always looks the visit back up by
+ * (assetGuid, serRecId) via getServiceVisit).
+ */
+export async function saveAssetServiceVisit(
+  assetGuid: string,
+  serRecId: number,
+  header: LocalAssetServiceProperty | null,
+  details: LocalAssetServiceProperty[],
+): Promise<string> {
+  const db = await getDb()
+
+  const existingRes = await db.query(
+    'SELECT serviceHisId FROM asset_service_history WHERE assetGuid = ? AND serRecId = ?',
+    [assetGuid, serRecId],
+  )
+  const existingRows = rowsOf<{ serviceHisId: string }>(existingRes)
+  const serviceHisId = existingRows[0]?.serviceHisId ?? crypto.randomUUID()
+
+  const rows = header ? [header, ...details] : details
+
+  await db.beginTransaction()
+  try {
+    // serviceDate is best-effort "when this visit was captured" - stamped
+    // at save time since the screen has no dedicated field for it (only
+    // Status has an obvious future UI hook, left null for now).
+    await db.run(
+      `INSERT INTO asset_service_history (serviceHisId, assetGuid, serRecId, serviceDate, status, synced)
+       VALUES (?, ?, ?, ?, ?, 0)
+       ON CONFLICT(serviceHisId) DO UPDATE SET
+         serviceDate = excluded.serviceDate,
+         synced = 0`,
+      [serviceHisId, assetGuid, serRecId, new Date().toISOString(), null],
+      false,
+    )
+
+    await db.run('DELETE FROM asset_service_properties WHERE serviceHisId = ?', [serviceHisId], false)
+
+    if (rows.length > 0) {
+      await db.executeSet(
+        rows.map((row) => ({
+          statement: `INSERT INTO asset_service_properties (
+            localId, serviceHisId, assetPropId, type, serviceFlag, ${VALUE_COLUMNS.join(', ')}
+          ) VALUES (?, ?, ?, ?, ?, ${VALUE_COLUMNS.map(() => '?').join(', ')})`,
+          values: [
+            row.localId,
+            serviceHisId,
+            row.assetPropId,
+            row.type,
+            row.serviceFlag ? 1 : 0,
+            ...VALUE_COLUMNS.map((col) => row[col as keyof LocalAssetServiceProperty] as string | null),
+          ],
+        })),
+        false,
+      )
+    }
+
+    await db.commitTransaction()
+  } catch (err) {
+    try {
+      await db.rollbackTransaction()
+    } catch {
+      // ignore - see upsertSyncData's comment on this same pattern
+    }
+    throw err
+  }
+
+  await persist()
+  return serviceHisId
+}
+
+/** Every locally-saved visit not yet confirmed pushed to the server - see
+ * saveAssetServiceVisit ("synced" reset to 0 on every save) and
+ * UtilitiesPage.handleSync (pushes these up before pulling fresh data down). */
+export async function getPendingAssetServiceVisits(): Promise<LocalAssetServiceVisit[]> {
+  const db = await getDb()
+  const historyRes = await db.query('SELECT * FROM asset_service_history WHERE synced = 0')
+  const histories = rowsOf<Record<string, unknown>>(historyRes).map(mapAssetServiceHistoryRow)
+
+  const visits: LocalAssetServiceVisit[] = []
+  for (const history of histories) {
+    const propsRes = await db.query('SELECT * FROM asset_service_properties WHERE serviceHisId = ?', [
+      history.serviceHisId,
+    ])
+    visits.push({
+      history,
+      properties: rowsOf<Record<string, unknown>>(propsRes).map(mapAssetServicePropertyRow),
+    })
+  }
+  return visits
+}
+
+/**
+ * Applies a SyncAssetServiceUp response back to local storage: marks each
+ * successfully-pushed visit synced (so it isn't pushed again next time) and
+ * backfills the server-assigned AssetPropId onto local property rows that
+ * didn't have one yet. That backfill matters - without it, saving and
+ * syncing the same newly-added device row a second time before the next
+ * sync-down would send AssetPropId = null again, and the server would
+ * insert a second, duplicate master AssetProperties row instead of
+ * updating the one it just created. A visit the server reports as failed
+ * is left with synced = 0 so the next Sync retries it.
+ */
+export async function applyAssetServiceUpResults(
+  visits: Array<{
+    serviceHisId: string
+    success: boolean
+    properties: Array<{ localId: string; assetPropId: number }>
+  }>,
+): Promise<void> {
+  const succeeded = visits.filter((v) => v.success)
+  if (succeeded.length === 0) return
+
+  const db = await getDb()
+  await db.beginTransaction()
+  try {
+    for (const visit of succeeded) {
+      await db.run(
+        'UPDATE asset_service_history SET synced = 1 WHERE serviceHisId = ?',
+        [visit.serviceHisId],
+        false,
+      )
+      for (const prop of visit.properties) {
+        await db.run(
+          'UPDATE asset_service_properties SET assetPropId = ? WHERE localId = ?',
+          [prop.assetPropId, prop.localId],
+          false,
+        )
+      }
+    }
+    await db.commitTransaction()
+  } catch (err) {
+    try {
+      await db.rollbackTransaction()
+    } catch {
+      // ignore - see upsertSyncData's comment on this same pattern
+    }
+    throw err
+  }
+
+  await persist()
+}
+
+/**
+ * Result of pushPendingAssetServiceVisits - a plain success/failure shape so
+ * callers (UtilitiesPage.handleSync, WipPage.handleCompleteJob) can each
+ * show their own error text without duplicating the push logic itself.
+ */
+export type PushPendingAssetServiceResult =
+  | { ok: true }
+  | { ok: false; message: string }
+
+/**
+ * Pushes every locally-saved, not-yet-synced Asset Service visit up through
+ * the single common SyncUp endpoint, and applies the result back to local
+ * storage (see applyAssetServiceUpResults) - shared by UtilitiesPage's
+ * manual Sync (push-then-pull) and WipPage's Complete Job (push only, so the
+ * job is marked complete with this visit's data already on the server -
+ * see WipPage.handleCompleteJob). A no-op (returns { ok: true } immediately)
+ * when there is nothing pending.
+ *
+ * Local data is left untouched on any failure - the caller decides what
+ * that means for its own flow (UtilitiesPage just reports it and lets the
+ * next Sync retry; WipPage must NOT mark the job complete, since the
+ * server's completion PDF/email is built from whatever Asset Service data
+ * it already has for this job at the moment CompleteJob is called).
+ */
+export async function pushPendingAssetServiceVisits(): Promise<PushPendingAssetServiceResult> {
+  const pendingVisits = await getPendingAssetServiceVisits()
+  if (pendingVisits.length === 0) {
+    return { ok: true }
+  }
+
+  const pushResult = await syncUp({
+    assetService: {
+      visits: pendingVisits.map(({ history, properties }) => ({
+        serviceHisId: history.serviceHisId,
+        assetGuid: history.assetGuid,
+        serRecId: history.serRecId,
+        serviceDate: history.serviceDate,
+        status: history.status,
+        // Drop serviceHisId from each property row - it's implied by the
+        // visit above and isn't part of the property DTO shape.
+        properties: properties.map(({ serviceHisId: _serviceHisId, ...rest }) => rest),
+      })),
+    },
+  })
+
+  if (!pushResult.hasData || !pushResult.data?.assetService) {
+    return {
+      ok: false,
+      message:
+        pushResult.failMessage ??
+        'Could not sync your saved service visits. Your local changes are safe and will be retried on the next Sync.',
+    }
+  }
+
+  const assetServiceResult = pushResult.data.assetService
+  await applyAssetServiceUpResults(assetServiceResult.visits)
+
+  const failedVisits = assetServiceResult.visits.filter((v) => !v.success)
+  if (failedVisits.length > 0) {
+    return {
+      ok: false,
+      message: `${failedVisits.length} saved service visit(s) could not be synced: ${failedVisits
+        .map((v) => v.failMessage ?? 'Unknown error')
+        .join('; ')}. They will be retried on the next Sync.`,
+    }
+  }
+
+  return { ok: true }
 }
 
 function mapJobRow(row: Record<string, unknown>): LocalJob {
@@ -652,5 +1051,19 @@ function mapAssetPropertyRow(row: Record<string, unknown>): LocalAssetProperty {
     ...(row as unknown as LocalAssetProperty),
     localModified: Boolean(row.local_modified),
     localCreated: Boolean(row.local_created),
+  }
+}
+
+function mapAssetServiceHistoryRow(row: Record<string, unknown>): LocalAssetServiceHistory {
+  return {
+    ...(row as unknown as LocalAssetServiceHistory),
+    synced: Boolean(row.synced),
+  }
+}
+
+function mapAssetServicePropertyRow(row: Record<string, unknown>): LocalAssetServiceProperty {
+  return {
+    ...(row as unknown as LocalAssetServiceProperty),
+    serviceFlag: Boolean(row.serviceFlag),
   }
 }

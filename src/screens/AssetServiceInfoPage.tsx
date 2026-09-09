@@ -6,6 +6,7 @@ import {
   IonBackButton,
   IonButton,
   IonButtons,
+  IonCheckbox,
   IonContent,
   IonFooter,
   IonHeader,
@@ -27,16 +28,23 @@ import {
 import { addOutline, closeOutline, createOutline, scanOutline } from 'ionicons/icons'
 import { Html5Qrcode } from 'html5-qrcode'
 import {
-  createBlankAssetPropertyRow,
+  createBlankAssetServicePropertyRow,
+  fromMasterProperty,
   getAssetByGuid,
   getAssetPropertiesByAssetGuid,
   getCommonCategoryByTemplateId,
   getCommonCategoryProps,
-  saveAssetProperties,
+  getCustomerById,
+  getJobById,
+  getServiceVisit,
+  getSiteById,
+  saveAssetServiceVisit,
   type LocalAsset,
-  type LocalAssetProperty,
+  type LocalAssetServiceProperty,
   type LocalCommonCategory,
   type LocalCommonCategoryProp,
+  type LocalCustomer,
+  type LocalSite,
 } from '../db/localData'
 import { getFieldValue, isFieldMissing, setFieldValue } from '../db/dynamicFields'
 import DynamicField from '../components/DynamicField'
@@ -47,20 +55,31 @@ import DynamicField from '../components/DynamicField'
  * (CategoryType 1) are shown as a compact table of existing rows with an
  * Edit button, and editing/adding a row opens a popup that updates an
  * in-memory draft only - nothing touches local SQLite until the page-level
- * Save button is pressed (and nothing is sent to the API at all yet, per
- * "do not sync it back to API yet").
+ * Save button is pressed.
+ *
+ * Save now writes to the asset_service_history/asset_service_properties
+ * tables (one visit per (assetGuid, serRecId), amended in place on repeat
+ * saves) rather than the legacy master asset_properties table - see
+ * localData.ts's saveAssetServiceVisit. The very first time this screen is
+ * opened for a given job+asset (no visit saved yet), the form is seeded
+ * from the legacy master values so the technician starts from the asset's
+ * last-known state instead of a blank form; every save after that loads
+ * back from the visit itself. Pushing a saved visit up to the server
+ * happens later, from UtilitiesPage's manual Sync.
  */
 export default function AssetServiceInfoPage() {
   const { serRecId, assetGuid } = useParams<{ serRecId: string; assetGuid: string }>()
 
   const [asset, setAsset] = useState<LocalAsset | null>(null)
+  const [site, setSite] = useState<LocalSite | null>(null)
+  const [customer, setCustomer] = useState<LocalCustomer | null>(null)
   const [category, setCategory] = useState<LocalCommonCategory | null>(null)
   const [fields, setFields] = useState<LocalCommonCategoryProp[]>([])
-  const [headerRow, setHeaderRow] = useState<LocalAssetProperty | null>(null)
-  const [detailRows, setDetailRows] = useState<LocalAssetProperty[]>([])
+  const [headerRow, setHeaderRow] = useState<LocalAssetServiceProperty | null>(null)
+  const [detailRows, setDetailRows] = useState<LocalAssetServiceProperty[]>([])
   const [loading, setLoading] = useState(true)
 
-  const [editingRow, setEditingRow] = useState<LocalAssetProperty | null>(null)
+  const [editingRow, setEditingRow] = useState<LocalAssetServiceProperty | null>(null)
   const [editingIsNew, setEditingIsNew] = useState(false)
   const [modalMissing, setModalMissing] = useState<Set<number>>(new Set())
 
@@ -71,6 +90,20 @@ export default function AssetServiceInfoPage() {
   // matching a device by its printed serial number/code without typing it.
   const [deviceQuery, setDeviceQuery] = useState('')
   const [scannerOpen, setScannerOpen] = useState(false)
+
+  const customerName = useMemo(() => {
+    if (!customer) return null
+    return (
+      customer.organizationName ||
+      [customer.firstName, customer.lastName].filter(Boolean).join(' ') ||
+      null
+    )
+  }, [customer])
+
+  const siteAddress = useMemo(() => {
+    if (!site) return null
+    return [site.address, site.town].filter(Boolean).join(', ') || null
+  }, [site])
 
   const headerFields = useMemo(
     () => fields.filter((f) => f.categoryType === 0).sort((a, b) => (a.ctrlOrder ?? 0) - (b.ctrlOrder ?? 0)),
@@ -102,11 +135,25 @@ export default function AssetServiceInfoPage() {
 
   useEffect(() => {
     void (async () => {
-      if (!assetGuid) return
+      if (!assetGuid || !serRecId) return
       setLoading(true)
+
+      const serRecIdNum = Number(serRecId)
 
       const loadedAsset = await getAssetByGuid(assetGuid)
       setAsset(loadedAsset)
+
+      const job = await getJobById(serRecIdNum)
+      let loadedSite: LocalSite | null = null
+      let loadedCustomer: LocalCustomer | null = null
+      if (job?.siteId != null) {
+        loadedSite = await getSiteById(job.siteId)
+        if (loadedSite?.custId != null) {
+          loadedCustomer = await getCustomerById(loadedSite.custId)
+        }
+      }
+      setSite(loadedSite)
+      setCustomer(loadedCustomer)
 
       let loadedCategory: LocalCommonCategory | null = null
       let loadedFields: LocalCommonCategoryProp[] = []
@@ -119,17 +166,33 @@ export default function AssetServiceInfoPage() {
       setCategory(loadedCategory)
       setFields(loadedFields)
 
-      const existingRows = await getAssetPropertiesByAssetGuid(assetGuid)
-      const existingHeader = existingRows.find((r) => r.type === 0) ?? null
-      const existingDetails = existingRows.filter((r) => r.type === 1)
+      // Prefer an already-saved visit for this exact (asset, job) pair -
+      // whether pending or already synced - over the legacy master values,
+      // so reopening a visit shows what was actually captured for THIS
+      // service call. Only when no visit has ever been saved here do we
+      // seed the form from the master AssetProperties values instead.
+      const existingVisit = await getServiceVisit(assetGuid, serRecIdNum)
+
+      let existingHeader: LocalAssetServiceProperty | null = null
+      let existingDetails: LocalAssetServiceProperty[] = []
+
+      if (existingVisit) {
+        existingHeader = existingVisit.properties.find((r) => r.type === 0) ?? null
+        existingDetails = existingVisit.properties.filter((r) => r.type === 1)
+      } else {
+        const masterRows = await getAssetPropertiesByAssetGuid(assetGuid)
+        const masterHeader = masterRows.find((r) => r.type === 0)
+        existingHeader = masterHeader ? fromMasterProperty(masterHeader) : null
+        existingDetails = masterRows.filter((r) => r.type === 1).map(fromMasterProperty)
+      }
 
       const hasHeaderFields = loadedFields.some((f) => f.categoryType === 0)
-      setHeaderRow(existingHeader ?? (hasHeaderFields ? createBlankAssetPropertyRow(assetGuid, 0) : null))
+      setHeaderRow(existingHeader ?? (hasHeaderFields ? createBlankAssetServicePropertyRow(0) : null))
       setDetailRows(existingDetails)
 
       setLoading(false)
     })()
-  }, [assetGuid])
+  }, [assetGuid, serRecId])
 
   // Barcode/QR scanning for the Devices search box. Uses the camera directly
   // via getUserMedia (through html5-qrcode) rather than a native Capacitor
@@ -182,16 +245,25 @@ export default function AssetServiceInfoPage() {
   }
 
   function openAddRow() {
-    if (!assetGuid) return
-    setEditingRow(createBlankAssetPropertyRow(assetGuid, 1))
+    setEditingRow(createBlankAssetServicePropertyRow(1))
     setEditingIsNew(true)
     setModalMissing(new Set())
   }
 
-  function openEditRow(row: LocalAssetProperty) {
+  function openEditRow(row: LocalAssetServiceProperty) {
     setEditingRow(row)
     setEditingIsNew(false)
     setModalMissing(new Set())
+  }
+
+  /** Flips a device row's serviced/not-serviced flag directly from the list -
+   * independent of opening the edit popup. Only updates in-memory state, same
+   * as any other field edit on this page - the page-level Save button is what
+   * actually persists it (and pushes it up on the next Sync). */
+  function toggleServiced(row: LocalAssetServiceProperty) {
+    setDetailRows((prev) =>
+      prev.map((r) => (r.localId === row.localId ? { ...r, serviceFlag: !r.serviceFlag } : r)),
+    )
   }
 
   function closeModal() {
@@ -241,8 +313,10 @@ export default function AssetServiceInfoPage() {
       return
     }
 
+    if (!assetGuid || !serRecId) return
+
     try {
-      await saveAssetProperties(headerRow, detailRows)
+      await saveAssetServiceVisit(assetGuid, Number(serRecId), headerRow, detailRows)
       setToast({ message: 'Saved to this device.', color: 'success' })
     } catch {
       setToast({ message: 'Could not save - please try again.', color: 'danger' })
@@ -293,7 +367,7 @@ export default function AssetServiceInfoPage() {
             <IonItem slot="header" color="light">
               <IonLabel>
                 <h2>{asset?.assetName ?? 'Asset'}</h2>
-                <p>{category?.name ?? asset?.assetModel ?? '—'}</p>
+                <p>Job #{serRecId}</p>
               </IonLabel>
             </IonItem>
             <div className="ion-padding" slot="content">
@@ -303,24 +377,16 @@ export default function AssetServiceInfoPage() {
                   <IonNote slot="end">{asset?.assetName ?? '—'}</IonNote>
                 </IonItem>
                 <IonItem>
-                  <IonLabel>Category</IonLabel>
-                  <IonNote slot="end">{category?.name ?? '—'}</IonNote>
+                  <IonLabel>Job Id</IonLabel>
+                  <IonNote slot="end">{serRecId ?? '—'}</IonNote>
                 </IonItem>
                 <IonItem>
-                  <IonLabel>Location</IonLabel>
-                  <IonNote slot="end">{asset?.location ?? '—'}</IonNote>
+                  <IonLabel>Customer</IonLabel>
+                  <IonNote slot="end">{customerName ?? '—'}</IonNote>
                 </IonItem>
                 <IonItem>
-                  <IonLabel>Serial No</IonLabel>
-                  <IonNote slot="end">{asset?.serialNo ?? '—'}</IonNote>
-                </IonItem>
-                <IonItem>
-                  <IonLabel>Last service</IonLabel>
-                  <IonNote slot="end">{asset?.lastServiceDate ?? '—'}</IonNote>
-                </IonItem>
-                <IonItem>
-                  <IonLabel>Next service due</IonLabel>
-                  <IonNote slot="end">{asset?.nextServiceDate ?? '—'}</IonNote>
+                  <IonLabel>Site Address</IonLabel>
+                  <IonNote slot="end">{siteAddress ?? '—'}</IonNote>
                 </IonItem>
               </IonList>
             </div>
@@ -421,6 +487,21 @@ export default function AssetServiceInfoPage() {
                               position: 'sticky',
                               top: 0,
                               zIndex: 1,
+                              width: 68,
+                              textAlign: 'center',
+                              fontSize: 13,
+                              color: 'var(--ion-color-medium)',
+                              background: 'var(--ion-background-color, #fff)',
+                              borderBottom: '1px solid var(--ion-color-light-shade, #e0e0e0)',
+                            }}
+                          >
+                            Serviced
+                          </th>
+                          <th
+                            style={{
+                              position: 'sticky',
+                              top: 0,
+                              zIndex: 1,
                               width: 44,
                               background: 'var(--ion-background-color, #fff)',
                               borderBottom: '1px solid var(--ion-color-light-shade, #e0e0e0)',
@@ -437,6 +518,13 @@ export default function AssetServiceInfoPage() {
                               {getFieldValue(row, col) || '—'}
                             </td>
                           ))}
+                          <td style={{ padding: '4px', textAlign: 'center' }}>
+                            <IonCheckbox
+                              aria-label="Serviced"
+                              checked={row.serviceFlag}
+                              onIonChange={() => toggleServiced(row)}
+                            />
+                          </td>
                           <td style={{ padding: '4px', textAlign: 'right' }}>
                             <IonButton fill="clear" size="small" onClick={() => openEditRow(row)}>
                               <IonIcon icon={createOutline} slot="icon-only" />

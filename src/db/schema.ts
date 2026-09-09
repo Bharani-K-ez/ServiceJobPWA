@@ -150,6 +150,64 @@ export const SCHEMA_STATEMENTS: string[] = [
     local_modified INTEGER NOT NULL DEFAULT 0,
     local_created INTEGER NOT NULL DEFAULT 0
   );`,
+  /**
+   * Local mirror of the server's new AssetServiceHis table - one row per
+   * (assetGuid, serRecId) "asset service" visit captured via this screen.
+   * Separate feature entirely from asset_properties above (which stays as
+   * the legacy master mirror, untouched by this table) - see backend
+   * CLAUDE.md's "don't touch existing tables" and AssetServiceHis.cs's own
+   * doc comment on the server side.
+   *
+   * - serviceHisId: the app-generated GUID reused for every save of the
+   *   same (assetGuid, serRecId) pair (localData.ts's saveAssetServiceVisit
+   *   finds-and-updates by this pair rather than inserting a new row per
+   *   save - "one history entry per job+asset, updated in place").
+   * - synced: 0 until a SyncAssetServiceUp push confirms the server has
+   *   this visit; UtilitiesPage's manual Sync pushes every synced = 0 row
+   *   up before pulling fresh data down, then flips this back to 1 (see
+   *   localData.ts's applyAssetServiceUpResults). Any further local edit
+   *   resets it back to 0 so the next Sync pushes it again.
+   */
+  `CREATE TABLE IF NOT EXISTS asset_service_history (
+    serviceHisId TEXT PRIMARY KEY NOT NULL,
+    assetGuid TEXT NOT NULL,
+    serRecId INTEGER NOT NULL,
+    serviceDate TEXT,
+    status INTEGER,
+    synced INTEGER NOT NULL DEFAULT 0
+  );`,
+  /**
+   * Property rows (header + detail/grid) for one asset_service_history
+   * visit. Full-replace semantics on every save, matching the server's own
+   * delete+reinsert in SyncV2Repository.PushAssetServiceUp: every save of a
+   * visit rewrites every row here for that serviceHisId to match the
+   * current in-memory set exactly, so a device row the technician removes
+   * before saving doesn't linger.
+   *
+   * serviceFlag: 1 = the technician has marked this device/detail row
+   * serviced during this visit, 0 = not yet. Toggled directly from the
+   * Devices list (see AssetServiceInfoPage.tsx), independent of opening the
+   * edit popup. Backed by AssetServiceProperties.ServiceFlag on the API
+   * side - there is NO equivalent column on the legacy master
+   * asset_properties table above, so this is never copied there.
+   */
+  `CREATE TABLE IF NOT EXISTS asset_service_properties (
+    localId TEXT PRIMARY KEY NOT NULL,
+    serviceHisId TEXT NOT NULL,
+    assetPropId INTEGER,
+    type INTEGER,
+    serviceFlag INTEGER NOT NULL DEFAULT 0,
+    value1 TEXT, value2 TEXT, value3 TEXT, value4 TEXT, value5 TEXT,
+    value6 TEXT, value7 TEXT, value8 TEXT, value9 TEXT, value10 TEXT,
+    value11 TEXT, value12 TEXT, value13 TEXT, value14 TEXT, value15 TEXT,
+    value16 TEXT, value17 TEXT, value18 TEXT, value19 TEXT, value20 TEXT,
+    value21 TEXT, value22 TEXT, value23 TEXT, value24 TEXT, value25 TEXT,
+    value26 TEXT, value27 TEXT, value28 TEXT, value29 TEXT, value30 TEXT,
+    value31 TEXT, value32 TEXT, value33 TEXT, value34 TEXT, value35 TEXT,
+    value36 TEXT, value37 TEXT, value38 TEXT, value39 TEXT, value40 TEXT,
+    value41 TEXT, value42 TEXT, value43 TEXT, value44 TEXT, value45 TEXT,
+    value46 TEXT, value47 TEXT, value48 TEXT, value49 TEXT, value50 TEXT
+  );`,
 ]
 
 /**
@@ -162,6 +220,7 @@ export const SCHEMA_STATEMENTS: string[] = [
  */
 export const MIGRATION_STATEMENTS: string[] = [
   'ALTER TABLE assets ADD COLUMN templateId INTEGER',
+  'ALTER TABLE asset_service_properties ADD COLUMN serviceFlag INTEGER NOT NULL DEFAULT 0',
 ]
 
 export const DB_NAME = 'servicejobs'

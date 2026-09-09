@@ -1,8 +1,19 @@
-import type { LocalAssetProperty, LocalCommonCategoryProp } from './localData'
+import type { LocalAssetProperty, LocalAssetServiceProperty, LocalCommonCategoryProp } from './localData'
 
 export interface SelectOption {
   value: string
 }
+
+/**
+ * Either row shape works here - LocalAssetProperty (legacy master rows) and
+ * LocalAssetServiceProperty (asset service history rows) both have the same
+ * value1..value50 dynamic-value columns. Overloads (rather than a generic
+ * constrained to Record<string, unknown>) so each call site still gets back
+ * its own concrete type - a plain interface isn't assignable to
+ * Record<string, unknown> without an explicit index signature, which is
+ * more churn than these two known shapes are worth.
+ */
+type DynamicValueRow = LocalAssetProperty | LocalAssetServiceProperty
 
 /**
  * Defensive parse of CommonCategoryProps.CtrlProps. The real shape (per
@@ -33,10 +44,7 @@ export function parseSelectOptions(ctrlProps: string | null | undefined): Select
 }
 
 /** Reads a field's value out of a row via CommonCategoryProps.PropColRefNo (1-50). */
-export function getFieldValue(
-  row: LocalAssetProperty,
-  prop: LocalCommonCategoryProp,
-): string | null {
+export function getFieldValue(row: DynamicValueRow, prop: LocalCommonCategoryProp): string | null {
   if (!prop.propColRefNo || prop.propColRefNo < 1 || prop.propColRefNo > 50) return null
   return (row as unknown as Record<string, string | null>)[`value${prop.propColRefNo}`] ?? null
 }
@@ -46,7 +54,17 @@ export function setFieldValue(
   row: LocalAssetProperty,
   prop: LocalCommonCategoryProp,
   value: string | null,
-): LocalAssetProperty {
+): LocalAssetProperty
+export function setFieldValue(
+  row: LocalAssetServiceProperty,
+  prop: LocalCommonCategoryProp,
+  value: string | null,
+): LocalAssetServiceProperty
+export function setFieldValue(
+  row: DynamicValueRow,
+  prop: LocalCommonCategoryProp,
+  value: string | null,
+): DynamicValueRow {
   if (!prop.propColRefNo || prop.propColRefNo < 1 || prop.propColRefNo > 50) return row
   return { ...row, [`value${prop.propColRefNo}`]: value }
 }

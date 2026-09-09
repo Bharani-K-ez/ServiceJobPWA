@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 import type { ReactNode } from 'react'
 import { getAuthToken } from '../api/authToken'
 import { logout as apiLogout } from '../api/auth'
+import { getOfflineSessionAccount } from '../api/localAuth'
 
 type AuthStatus = 'loading' | 'authed' | 'anon'
 
@@ -19,8 +20,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>('loading')
 
   const refresh = useCallback(async () => {
-    const token = await getAuthToken()
-    setStatus(token ? 'authed' : 'anon')
+    // A real JWT means an online session; the offline-session marker
+    // means the last login was validated locally (no network) against
+    // credentials saved from an earlier successful online login - see
+    // api/auth.ts and api/localAuth.ts. Either one counts as "authed" so
+    // the app can run entirely off local SQLite data with no connection.
+    const [token, offlineAccount] = await Promise.all([getAuthToken(), getOfflineSessionAccount()])
+    setStatus(token || offlineAccount ? 'authed' : 'anon')
   }, [])
 
   const signOut = useCallback(async () => {

@@ -62,3 +62,23 @@ export function getDb(): Promise<SQLiteDBConnection> {
   }
   return dbPromise
 }
+
+/**
+ * Flushes the database to its durable store. Only meaningful on web: the
+ * jeep-sqlite backend runs SQLite compiled to WASM entirely in memory and
+ * only writes its blob to IndexedDB when explicitly told to - without this,
+ * every local write (job status, saved asset properties, a sync) is lost
+ * on a full page reload. Native iOS/Android write straight to an on-disk
+ * SQLite file via the real Capacitor plugin, so there is no separate flush
+ * step there - this is a no-op on that platform.
+ *
+ * Callers should await this after any write they need to survive a
+ * reload/app-restart - see localData.ts's mutating functions, which all
+ * call this once their transaction (if any) has committed.
+ */
+export async function persist(): Promise<void> {
+  if (Capacitor.getPlatform() !== 'web') {
+    return
+  }
+  await sqliteConnection.saveToStore(DB_NAME)
+}

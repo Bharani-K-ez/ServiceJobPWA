@@ -183,3 +183,121 @@ export interface SyncV2ResponseDto {
   commonCategoryProps: SyncV2CommonCategoryPropDto[]
   assetProperties: SyncV2AssetPropertyDto[]
 }
+
+/**
+ * The AssetService portion of the common POST /api/MobileV2/SyncV2/SyncUp
+ * request/response body (see SyncUpRequestDto/SyncUpResponseDto below) -
+ * mirrors AssetServiceUpRequest/AssetServiceUpResponse on the API side
+ * (ezServiceHUB.Domain.ApiRequest / ApiResponse). Request bodies don't go
+ * through httpClient's PascalCase->camelCase conversion (that's
+ * response-only, see httpClient.ts) - ASP.NET Core's model binding is
+ * case-insensitive, so these plain camelCase shapes bind fine as-is.
+ */
+export interface AssetServicePropertyUpDto {
+  localId: string
+  assetPropId: number | null
+  type: number | null
+  /** true = serviced, false = not serviced. No legacy-master equivalent. */
+  serviceFlag: boolean
+  value1: string | null
+  value2: string | null
+  value3: string | null
+  value4: string | null
+  value5: string | null
+  value6: string | null
+  value7: string | null
+  value8: string | null
+  value9: string | null
+  value10: string | null
+  value11: string | null
+  value12: string | null
+  value13: string | null
+  value14: string | null
+  value15: string | null
+  value16: string | null
+  value17: string | null
+  value18: string | null
+  value19: string | null
+  value20: string | null
+  value21: string | null
+  value22: string | null
+  value23: string | null
+  value24: string | null
+  value25: string | null
+  value26: string | null
+  value27: string | null
+  value28: string | null
+  value29: string | null
+  value30: string | null
+  value31: string | null
+  value32: string | null
+  value33: string | null
+  value34: string | null
+  value35: string | null
+  value36: string | null
+  value37: string | null
+  value38: string | null
+  value39: string | null
+  value40: string | null
+  value41: string | null
+  value42: string | null
+  value43: string | null
+  value44: string | null
+  value45: string | null
+  value46: string | null
+  value47: string | null
+  value48: string | null
+  value49: string | null
+  value50: string | null
+}
+
+export interface AssetServiceVisitUpDto {
+  serviceHisId: string
+  assetGuid: string
+  serRecId: number
+  serviceDate: string | null
+  status: number | null
+  properties: AssetServicePropertyUpDto[]
+}
+
+export interface AssetServiceUpRequestDto {
+  visits: AssetServiceVisitUpDto[]
+}
+
+export interface AssetServicePropertyUpResultDto {
+  localId: string
+  assetPropId: number
+}
+
+export interface AssetServiceVisitUpResultDto {
+  serviceHisId: string
+  success: boolean
+  failMessage: string | null
+  properties: AssetServicePropertyUpResultDto[]
+}
+
+export interface AssetServiceUpResponseDto {
+  visits: AssetServiceVisitUpResultDto[]
+}
+
+/**
+ * The single common request/response body for POST
+ * /api/MobileV2/SyncV2/SyncUp - the one endpoint the app pushes ALL
+ * locally-saved data up through, regardless of which feature produced it
+ * (see SyncUpRequest/SyncUpResponse on the API side). Each kind of
+ * transaction gets its own optional property here (only assetService for
+ * now); build the request with only the properties you actually have
+ * pending data for, matching the API's "only populated properties are
+ * processed" contract.
+ *
+ * Adding a new synced transaction type later means adding one more
+ * optional property here (and its matching Dto shape), never a new
+ * endpoint or a new api/*.ts client function.
+ */
+export interface SyncUpRequestDto {
+  assetService?: AssetServiceUpRequestDto
+}
+
+export interface SyncUpResponseDto {
+  assetService?: AssetServiceUpResponseDto
+}
