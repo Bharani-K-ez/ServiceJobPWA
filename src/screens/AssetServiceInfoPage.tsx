@@ -54,18 +54,26 @@ import DynamicField from '../components/DynamicField'
  * (CategoryType 0) are edited directly on the page; detail/grid fields
  * (CategoryType 1) are shown as a compact table of existing rows with an
  * Edit button, and editing/adding a row opens a popup that updates an
- * in-memory draft only - nothing touches local SQLite until the page-level
- * Save button is pressed.
+ * in-memory draft, committed into headerRow/detailRows state on "Done".
  *
- * Save now writes to the asset_service_history/asset_service_properties
- * tables (one visit per (assetGuid, serRecId), amended in place on repeat
- * saves) rather than the legacy master asset_properties table - see
- * localData.ts's saveAssetServiceVisit. The very first time this screen is
- * opened for a given job+asset (no visit saved yet), the form is seeded
- * from the legacy master values so the technician starts from the asset's
- * last-known state instead of a blank form; every save after that loads
- * back from the visit itself. Pushing a saved visit up to the server
- * happens later, from UtilitiesPage's manual Sync.
+ * Two different things can write that state to local SQLite:
+ *  - A silent background autosave (see the effect below this component's
+ *    state declarations) debounces any tracked change into a save at
+ *    status 0 ("work in progress") - no toast, no navigation, purely
+ *    "don't lose the technician's work" insurance.
+ *  - The page-level Save button (handleSave) is the only thing that writes
+ *    status 1 ("Serviced") - and only after validating every required
+ *    field, unlike the autosave. See saveAssetServiceVisit's doc comment
+ *    in localData.ts for the full status lifecycle.
+ *
+ * Both write to the asset_service_history/asset_service_properties tables
+ * (one visit per (assetGuid, serRecId), amended in place on repeat saves)
+ * rather than the legacy master asset_properties table. The very first time
+ * this screen is opened for a given job+asset (no visit saved yet), the
+ * form is seeded from the legacy master values so the technician starts
+ * from the asset's last-known state instead of a blank form; every save
+ * after that loads back from the visit itself. Pushing a saved visit up to
+ * the server happens later, from UtilitiesPage's manual Sync.
  */
 export default function AssetServiceInfoPage() {
   const { serRecId, assetGuid } = useParams<{ serRecId: string; assetGuid: string }>()
@@ -134,10 +142,32 @@ export default function AssetServiceInfoPage() {
   // while the normal/default state keeps everything visible at once.
   const [openSections, setOpenSections] = useState<string[]>(['info', 'header', 'detail'])
 
+  // Silent background autosave (see the effect below, and
+  // saveAssetServiceVisit's doc comment for the status 0/1 meaning). These
+  // are refs, not state: the debounce timer and the unmount-flush cleanup
+  // both need the LATEST headerRow/detailRows without re-subscribing, and
+  // skipNextAutosaveRef/autosavePendingRef are plumbing that must never
+  // itself trigger a re-render.
+  const skipNextAutosaveRef = useRef(true)
+  const autosavePendingRef = useRef(false)
+  const autosaveTimerRef = useRef<number | null>(null)
+  const headerRowRef = useRef(headerRow)
+  const detailRowsRef = useRef(detailRows)
+  const assetGuidRef = useRef(assetGuid)
+  const serRecIdRef = useRef(serRecId)
+  headerRowRef.current = headerRow
+  detailRowsRef.current = detailRows
+  assetGuidRef.current = assetGuid
+  serRecIdRef.current = serRecId
+
   useEffect(() => {
     void (async () => {
       if (!assetGuid || !serRecId) return
       setLoading(true)
+      // A fresh asset/job pair: the next headerRow/detailRows change the
+      // autosave effect sees is this load's OWN setHeaderRow/setDetailRows
+      // below, not a technician edit - skip that one.
+      skipNextAutosaveRef.current = true
 
       const serRecIdNum = Number(serRecId)
 
@@ -194,6 +224,61 @@ export default function AssetServiceInfoPage() {
       setLoading(false)
     })()
   }, [assetGuid, serRecId])
+
+  // Silent background autosave: ANY tracked change to headerRow/detailRows
+  // - a header field edit, a device row added/edited/removed via the modal
+  // (confirmModal), or the Serviced checkbox toggled directly (toggleServiced)
+  // - debounces into a save at status 0 ("work in progress"), with no toast
+  // and no navigation. This deliberately fires again even for an asset that
+  // was already explicitly Saved (status 1/"Serviced") - touching the form
+  // again means it's back to in-progress until Save is pressed again. See
+  // saveAssetServiceVisit's doc comment for the full 0/1 lifecycle.
+  useEffect(() => {
+    if (loading) return
+    if (skipNextAutosaveRef.current) {
+      // This run is the load effect's own initial setHeaderRow/setDetailRows
+      // landing, not a technician edit - don't autosave it.
+      skipNextAutosaveRef.current = false
+      return
+    }
+    if (!assetGuid || !serRecId) return
+
+    autosavePendingRef.current = true
+    const timer = window.setTimeout(() => {
+      autosaveTimerRef.current = null
+      void saveAssetServiceVisit(assetGuid, Number(serRecId), headerRowRef.current, detailRowsRef.current, 0)
+        .then(() => {
+          autosavePendingRef.current = false
+        })
+        .catch(() => {
+          // Silent by design - a background autosave failure shouldn't
+          // interrupt the technician. The next tracked change (debounced
+          // again) or the explicit Save button will try again.
+        })
+    }, 10000)
+    autosaveTimerRef.current = timer
+
+    return () => window.clearTimeout(timer)
+  }, [headerRow, detailRows, loading, assetGuid, serRecId])
+
+  // Flushes a still-pending autosave if the technician navigates away
+  // before the debounce above fires (e.g. an edit immediately followed by
+  // the back button) - otherwise that last edit would silently never be
+  // saved. Runs only on unmount (empty deps): headerRowRef/detailRowsRef
+  // are kept current every render specifically so this closure always sees
+  // the latest values despite never itself re-subscribing.
+  useEffect(() => {
+    return () => {
+      const guid = assetGuidRef.current
+      const rec = serRecIdRef.current
+      if (autosavePendingRef.current && guid && rec) {
+        void saveAssetServiceVisit(guid, Number(rec), headerRowRef.current, detailRowsRef.current, 0).catch(
+          () => undefined,
+        )
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Barcode/QR scanning for the Devices search box. Uses the camera directly
   // via getUserMedia (through html5-qrcode) rather than a native Capacitor
@@ -292,6 +377,15 @@ export default function AssetServiceInfoPage() {
   }
 
   async function handleSave() {
+    // Cancel any autosave the debounce timer still has scheduled before
+    // doing the explicit, validated save below - otherwise it could fire
+    // moments later at status 0 and stomp the status-1 "Serviced" save this
+    // function is about to make.
+    if (autosaveTimerRef.current != null) {
+      window.clearTimeout(autosaveTimerRef.current)
+      autosaveTimerRef.current = null
+    }
+
     const missingLabels: string[] = []
 
     if (headerRow) {
@@ -317,7 +411,14 @@ export default function AssetServiceInfoPage() {
     if (!assetGuid || !serRecId) return
 
     try {
-      await saveAssetServiceVisit(assetGuid, Number(serRecId), headerRow, detailRows)
+      // status: 1 - this is the ONLY place that marks the visit "Serviced"
+      // (see saveAssetServiceVisit's doc comment). Cancel any autosave the
+      // background effect still has pending BEFORE navigating away: this
+      // page is about to unmount, and its unmount-flush effect would
+      // otherwise re-save at status 0 right behind this status-1 save and
+      // silently un-mark the asset as serviced.
+      await saveAssetServiceVisit(assetGuid, Number(serRecId), headerRow, detailRows, 1)
+      autosavePendingRef.current = false
       // Back to the Asset Service list rather than a toast-and-stay: the
       // list is what shows this asset now marked "Serviced" (see
       // AssetServiceListPage's servicedGuids), so returning to it is the

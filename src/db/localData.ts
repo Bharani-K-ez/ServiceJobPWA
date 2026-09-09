@@ -801,10 +801,23 @@ export async function getServiceVisit(
 /**
  * Finds or creates the asset_service_history row for this (assetGuid,
  * serRecId) visit and full-replaces its asset_service_properties rows with
- * `header` + `details` - the "Save" button on AssetServiceInfoPage.
- * ServiceHisId is reused across repeated saves of the same visit ("one
- * history entry per job+asset, updated in place" - confirmed with the user)
- * rather than creating a new history row every time.
+ * `header` + `details`. ServiceHisId is reused across repeated saves of the
+ * same visit ("one history entry per job+asset, updated in place" -
+ * confirmed with the user) rather than creating a new history row every
+ * time.
+ *
+ * `status` is the local WIP/Serviced flag on this exact row (distinct from,
+ * and unrelated to, the server's own Status = 0/1 lifecycle tied to job
+ * completion - see SyncV2Repository.PushAssetServiceUp's doc comment; the
+ * server always hardcodes 0 on push regardless of what's sent here):
+ *   0 - a silent background autosave (AssetServiceInfoPage's dirty-tracking
+ *       effect) triggered by an in-progress edit. "Work in progress."
+ *   1 - the technician explicitly pressed the page's Save button on a fully
+ *       valid form. "Serviced" - this is what AssetServiceListPage's
+ *       getServicedAssetGuidsForJob checks for. Touching the form again
+ *       after this (any further tracked change) autosaves back to 0 until
+ *       Save is pressed again - "serviced" always means "confirmed as of
+ *       the last explicit save", not "has ever been saved once."
  *
  * Always resets `synced` back to 0, even for a visit that had already been
  * pushed up successfully - any edit after a sync must go up again on the
@@ -819,6 +832,7 @@ export async function saveAssetServiceVisit(
   serRecId: number,
   header: LocalAssetServiceProperty | null,
   details: LocalAssetServiceProperty[],
+  status: 0 | 1,
 ): Promise<string> {
   const db = await getDb()
 
@@ -834,15 +848,15 @@ export async function saveAssetServiceVisit(
   await db.beginTransaction()
   try {
     // serviceDate is best-effort "when this visit was captured" - stamped
-    // at save time since the screen has no dedicated field for it (only
-    // Status has an obvious future UI hook, left null for now).
+    // at save time since the screen has no dedicated field for it.
     await db.run(
       `INSERT INTO asset_service_history (serviceHisId, assetGuid, serRecId, serviceDate, status, synced)
        VALUES (?, ?, ?, ?, ?, 0)
        ON CONFLICT(serviceHisId) DO UPDATE SET
          serviceDate = excluded.serviceDate,
+         status = excluded.status,
          synced = 0`,
-      [serviceHisId, assetGuid, serRecId, new Date().toISOString(), null],
+      [serviceHisId, assetGuid, serRecId, new Date().toISOString(), status],
       false,
     )
 
@@ -882,20 +896,21 @@ export async function saveAssetServiceVisit(
 }
 
 /**
- * The set of assetGuids that already have a saved asset_service_history
- * visit for this job (whether pending or already synced) - used by
- * AssetServiceListPage to mark an asset "Serviced" in the list. A row
- * existing here means the technician has saved a visit for that asset on
- * this specific job, regardless of Status (see SyncV2Repository's
- * Status = 0/1 lifecycle - that governs what counts as *completed-job*
- * history server-side once the job itself is completed, but locally, on
- * the device, "has a record for this job" is exactly "has been saved").
+ * The set of assetGuids marked "Serviced" (status = 1 - an explicit,
+ * validated Save on AssetServiceInfoPage, not just a background autosave)
+ * for this job - used by AssetServiceListPage to badge an asset in the
+ * list. A row with status = 0 here means only a silent autosave has
+ * happened (still work-in-progress) and does NOT count - see
+ * saveAssetServiceVisit's doc comment for the local status lifecycle. Note
+ * this is distinct from the server's own Status = 0/1 lifecycle (tied to
+ * job completion, not to this page's Save button).
  */
 export async function getServicedAssetGuidsForJob(serRecId: number): Promise<Set<string>> {
   const db = await getDb()
-  const res = await db.query('SELECT DISTINCT assetGuid FROM asset_service_history WHERE serRecId = ?', [
-    serRecId,
-  ])
+  const res = await db.query(
+    'SELECT DISTINCT assetGuid FROM asset_service_history WHERE serRecId = ? AND status = 1',
+    [serRecId],
+  )
   const rows = rowsOf<{ assetGuid: string }>(res)
   return new Set(rows.map((r) => r.assetGuid))
 }
