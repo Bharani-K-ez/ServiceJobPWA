@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useLocation, useParams } from 'react-router-dom'
 import {
   IonBackButton,
+  IonBadge,
   IonButton,
   IonButtons,
   IonContent,
@@ -14,7 +15,12 @@ import {
   IonTitle,
   IonToolbar,
 } from '@ionic/react'
-import { getAssetsBySite, getJobById, type LocalAsset } from '../db/localData'
+import {
+  getAssetsBySite,
+  getJobById,
+  getServicedAssetGuidsForJob,
+  type LocalAsset,
+} from '../db/localData'
 
 /** Fields a "wild" (contains, case/accent-insensitive) asset search matches against. */
 function assetSearchText(asset: LocalAsset): string {
@@ -27,17 +33,32 @@ function assetSearchText(asset: LocalAsset): string {
 export default function AssetServiceListPage() {
   const { serRecId } = useParams<{ serRecId: string }>()
   const id = Number(serRecId)
+  const location = useLocation()
   const [assets, setAssets] = useState<LocalAsset[]>([])
+  const [servicedGuids, setServicedGuids] = useState<Set<string>>(new Set())
   const [query, setQuery] = useState('')
 
-  useEffect(() => {
-    void (async () => {
-      const job = await getJobById(id)
-      if (job?.siteId != null) {
-        setAssets(await getAssetsBySite(job.siteId))
-      }
-    })()
+  const load = useCallback(async () => {
+    const job = await getJobById(id)
+    if (job?.siteId != null) {
+      setAssets(await getAssetsBySite(job.siteId))
+    }
+    setServicedGuids(await getServicedAssetGuidsForJob(id))
   }, [id])
+
+  // AssetServiceInfoPage's Save button (see its handleSave) navigates back
+  // here with a REPLACE, not a genuine back-navigation - same situation
+  // JobListPage's own doc comment explains: IonRouterOutlet keeps this
+  // page's earlier mount around from the initial forward navigation, so a
+  // plain useEffect keyed on `id` (unchanged across the replace) would never
+  // re-run and the just-saved "Serviced" badge wouldn't show up. Reacting to
+  // react-router's own `location` - which gets a new key on every
+  // navigation, replace included - is what makes it refresh.
+  useEffect(() => {
+    if (location.pathname === `/jobs/${id}/assets`) {
+      void load()
+    }
+  }, [location, id, load])
 
   const filteredAssets = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -75,21 +96,26 @@ export default function AssetServiceListPage() {
           </div>
         )}
         <IonList>
-          {filteredAssets.map((asset) => (
-            <IonItem key={asset.assetGuid}>
-              <IonLabel className="ion-text-wrap">
-                <h2>{asset.assetName ?? asset.assetModel ?? 'Asset'}</h2>
-                <p>{asset.location}</p>
-                <p>{asset.serialNo ? `S/N ${asset.serialNo}` : null}</p>
-              </IonLabel>
-              <IonButton
-                slot="end"
-                routerLink={`/jobs/${id}/assets/${asset.assetGuid}`}
-              >
-                Service
-              </IonButton>
-            </IonItem>
-          ))}
+          {filteredAssets.map((asset) => {
+            const isServiced = servicedGuids.has(asset.assetGuid)
+            return (
+              <IonItem key={asset.assetGuid}>
+                <IonLabel className="ion-text-wrap">
+                  <h2>{asset.assetName ?? asset.assetModel ?? 'Asset'}</h2>
+                  <p>{asset.location}</p>
+                  <p>{asset.serialNo ? `S/N ${asset.serialNo}` : null}</p>
+                </IonLabel>
+                {isServiced && <IonBadge color="success">Serviced</IonBadge>}
+                <IonButton
+                  slot="end"
+                  fill={isServiced ? 'outline' : 'solid'}
+                  routerLink={`/jobs/${id}/assets/${asset.assetGuid}`}
+                >
+                  {isServiced ? 'Update' : 'Service'}
+                </IonButton>
+              </IonItem>
+            )
+          })}
         </IonList>
       </IonContent>
     </IonPage>

@@ -881,6 +881,25 @@ export async function saveAssetServiceVisit(
   return serviceHisId
 }
 
+/**
+ * The set of assetGuids that already have a saved asset_service_history
+ * visit for this job (whether pending or already synced) - used by
+ * AssetServiceListPage to mark an asset "Serviced" in the list. A row
+ * existing here means the technician has saved a visit for that asset on
+ * this specific job, regardless of Status (see SyncV2Repository's
+ * Status = 0/1 lifecycle - that governs what counts as *completed-job*
+ * history server-side once the job itself is completed, but locally, on
+ * the device, "has a record for this job" is exactly "has been saved").
+ */
+export async function getServicedAssetGuidsForJob(serRecId: number): Promise<Set<string>> {
+  const db = await getDb()
+  const res = await db.query('SELECT DISTINCT assetGuid FROM asset_service_history WHERE serRecId = ?', [
+    serRecId,
+  ])
+  const rows = rowsOf<{ assetGuid: string }>(res)
+  return new Set(rows.map((r) => r.assetGuid))
+}
+
 /** Every locally-saved visit not yet confirmed pushed to the server - see
  * saveAssetServiceVisit ("synced" reset to 0 on every save) and
  * UtilitiesPage.handleSync (pushes these up before pulling fresh data down). */

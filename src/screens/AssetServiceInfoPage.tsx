@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import {
   IonAccordion,
   IonAccordionGroup,
@@ -69,6 +69,7 @@ import DynamicField from '../components/DynamicField'
  */
 export default function AssetServiceInfoPage() {
   const { serRecId, assetGuid } = useParams<{ serRecId: string; assetGuid: string }>()
+  const navigate = useNavigate()
 
   const [asset, setAsset] = useState<LocalAsset | null>(null)
   const [site, setSite] = useState<LocalSite | null>(null)
@@ -317,7 +318,13 @@ export default function AssetServiceInfoPage() {
 
     try {
       await saveAssetServiceVisit(assetGuid, Number(serRecId), headerRow, detailRows)
-      setToast({ message: 'Saved to this device.', color: 'success' })
+      // Back to the Asset Service list rather than a toast-and-stay: the
+      // list is what shows this asset now marked "Serviced" (see
+      // AssetServiceListPage's servicedGuids), so returning to it is the
+      // useful confirmation that the save took. A REPLACE (not a plain
+      // navigate) so the back button from the list doesn't return to this
+      // now-saved form - same pattern as WipPage's Complete/Pause Job.
+      navigate(`/jobs/${serRecId}/assets`, { replace: true })
     } catch {
       setToast({ message: 'Could not save - please try again.', color: 'danger' })
     }
