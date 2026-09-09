@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">ServiceJobs</string>
+    <string name="title_activity_main">ServiceJobs</string>
+    <string name="package_name">com.ezmanagement.servicejobs</string>
+    <string name="custom_url_scheme">com.ezmanagement.servicejobs</string>
+</resources>

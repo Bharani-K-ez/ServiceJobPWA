@@ -48,6 +48,32 @@ let webStoreReady: Promise<void> | null = null
  * whole time. The data was never lost; the app just occasionally opened
  * past it. Explicitly waiting for a true isStoreOpen() before doing
  * anything else closes that window.
+ *
+ * UPDATE, confirmed by a second live reproduction: isStoreOpen() does not
+ * only ever return false while pending - it can return a promise that
+ * never settles at all (observed hanging indefinitely on a reload,
+ * reproduced directly in the live app's own console: `await
+ * document.querySelector('jeep-sqlite').isStoreOpen()` simply never
+ * returned). That happened alongside console warnings naming jeep-sqlite's
+ * own lazy-loaded Stencil chunk as "a cross-world service worker resource
+ * mismatch" - i.e. the browser resolved two different physical files for
+ * what should be one logical module, which is consistent with the
+ * *specific instance* this code queries never being the one whose
+ * connectedCallback() actually runs and resolves isStore. Retrying the
+ * exact same call in a loop cannot route around that - it is not a
+ * "not-ready-yet" state that more polling fixes, it is a promise that will
+ * never settle. So each individual isStoreOpen() call here is now also
+ * bounded by raceTimeout(), and this function's caller (ensureWebStore)
+ * bounds the whole sequence again from outside for the same reason -
+ * without an outer bound, a hang here (or, just as fatal, one inside
+ * initWebStore()'s own separate isStoreOpen() call, which this function
+ * has no control over) would leave webStoreReady/dbPromise permanently
+ * *pending* rather than rejected, which is worse than an error: nothing
+ * downstream ever throws, so nothing (not even navigating away to Settings
+ * and back to Jobs, which just re-awaits the same stuck promise) can ever
+ * recover without a full page reload. This is believed to be the root
+ * cause of the "DB looks like it's not initializing at all, and the old
+ * Settings-then-back-to-Jobs workaround stopped helping too" regression.
  */
 async function waitForJeepSqliteStore(timeoutMs = 5000): Promise<void> {
   const el = document.querySelector('jeep-sqlite') as JeepSqliteElement | null
@@ -57,14 +83,40 @@ async function waitForJeepSqliteStore(timeoutMs = 5000): Promise<void> {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
     try {
-      if (await el.isStoreOpen()) {
+      if (await raceTimeout(el.isStoreOpen(), 1000)) {
         return
       }
     } catch {
-      // Element not fully upgraded yet - keep polling until the timeout.
+      // Either isStoreOpen() itself threw, or our 1s per-call race timed
+      // out (see raceTimeout's doc comment for why that second case is
+      // real and confirmed, not theoretical) - keep polling either way
+      // until the overall timeoutMs elapses.
     }
     await new Promise((resolve) => setTimeout(resolve, 50))
   }
+}
+
+/**
+ * Races a promise against a timeout, so a caller can move on instead of
+ * hanging forever. Rejects with `new Error('timeout')` if `ms` elapses
+ * first; the original promise, if it later settles, is simply ignored (its
+ * result/rejection has no further effect - this can't cancel real work,
+ * only stop *waiting* on it).
+ */
+function raceTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('timeout')), ms)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (err) => {
+        clearTimeout(timer)
+        reject(err)
+      },
+    )
+  })
 }
 
 async function ensureWebStore(): Promise<void> {
@@ -72,11 +124,35 @@ async function ensureWebStore(): Promise<void> {
     return
   }
   if (!webStoreReady) {
-    webStoreReady = (async () => {
-      await customElements.whenDefined('jeep-sqlite')
-      await waitForJeepSqliteStore()
-      await sqliteConnection.initWebStore()
-    })()
+    webStoreReady = raceTimeout(
+      (async () => {
+        await customElements.whenDefined('jeep-sqlite')
+        await waitForJeepSqliteStore()
+        // sqliteConnection.initWebStore() calls the jeep-sqlite element's
+        // isStoreOpen() again internally (see @capacitor-community/sqlite's
+        // web.ts) - that call is NOT wrapped by raceTimeout above, so it's
+        // still exposed to the same hang. The outer raceTimeout wrapping
+        // this whole IIFE (below) is what actually bounds that case too.
+        await sqliteConnection.initWebStore()
+      })(),
+      8000,
+    ).catch((err) => {
+      // If this attempt fails (e.g. the store never reported open before
+      // waitForJeepSqliteStore's timeout, so initWebStore's own internal
+      // isStoreOpen() check also came back false and every downstream
+      // CapacitorSQLiteWeb method start throwing "WebStore is not open
+      // yet"), do NOT leave the failure cached here forever. webStoreReady
+      // is a module-level singleton that's normally never reset - without
+      // this reset, this exact rejection would be replayed for every future
+      // call for the rest of the page's lifetime, including one triggered
+      // by navigating away (e.g. to Settings) and back to Jobs, which is
+      // exactly the "was working as a recovery workaround before, now
+      // navigating away and back doesn't help either" regression this fixes.
+      // Clearing it lets the next call start a genuinely fresh attempt.
+      webStoreReady = null
+      console.error('[sqlite] ensureWebStore failed, will retry on next call:', err)
+      throw err
+    })
   }
   await webStoreReady
 }
@@ -109,7 +185,19 @@ async function openDb(): Promise<SQLiteDBConnection> {
 /** Resolves once to the same open, schema-migrated connection. */
 export function getDb(): Promise<SQLiteDBConnection> {
   if (!dbPromise) {
-    dbPromise = openDb()
+    // Same reasoning as webStoreReady above: if openDb() ever rejects (it
+    // calls ensureWebStore(), plus its own createConnection()/open() calls,
+    // any of which can throw), clear the cache instead of pinning the
+    // rejection in place forever. Without this, one bad attempt would
+    // permanently break the app for the rest of the page's lifetime, with
+    // no way to recover short of a full reload - not even by navigating
+    // away and back, since that just calls getDb() again and got the same
+    // dead promise back.
+    dbPromise = openDb().catch((err) => {
+      dbPromise = null
+      console.error('[sqlite] openDb failed, will retry on next call:', err)
+      throw err
+    })
   }
   return dbPromise
 }

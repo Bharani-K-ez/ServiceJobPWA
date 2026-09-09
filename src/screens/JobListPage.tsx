@@ -46,19 +46,40 @@ export default function JobListPage() {
   const [pausingSerRecId, setPausingSerRecId] = useState<number | null>(null)
 
   const load = useCallback(async () => {
-    const [jobs, wipJob] = await Promise.all([getOpenJobs(), getWipJob()])
-    const withSites = await Promise.all(
-      jobs.map(async (job) => {
-        const site = job.siteId != null ? await getSiteById(job.siteId) : null
-        const siteLabel = site
-          ? [site.occupant, site.address, site.town].filter(Boolean).join(', ')
-          : 'No site on file'
-        return { job, siteLabel }
-      }),
-    )
-    setRows(withSites)
-    setWipSerRecId(wipJob?.serRecId ?? null)
-    setLoading(false)
+    setError(null)
+    try {
+      const [jobs, wipJob] = await Promise.all([getOpenJobs(), getWipJob()])
+      const withSites = await Promise.all(
+        jobs.map(async (job) => {
+          const site = job.siteId != null ? await getSiteById(job.siteId) : null
+          const siteLabel = site
+            ? [site.occupant, site.address, site.town].filter(Boolean).join(', ')
+            : 'No site on file'
+          return { job, siteLabel }
+        }),
+      )
+      setRows(withSites)
+      setWipSerRecId(wipJob?.serRecId ?? null)
+    } catch (err) {
+      // Without this, a failure here (e.g. the local database failing to
+      // open - see sqlite.ts's getDb()/ensureWebStore() for a case that
+      // used to hang forever with no rejection at all) left this page
+      // silently stuck on its initial empty/loading state forever: no
+      // error shown, and - since the useEffect below just fires load()
+      // and never inspects the result - an unhandled promise rejection
+      // that only ever showed up in the browser console, not to the user
+      // in the field. Surfacing it here also means the existing "go to
+      // Settings and come back to Jobs" recovery path actually has
+      // something to show for itself when the retry (now possible again
+      // after sqlite.ts's cache-reset fix) still fails.
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'Could not load your jobs. Try again, or go to Settings and back.',
+      )
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   // IonRouterOutlet keeps this page's component mounted (for back-navigation
