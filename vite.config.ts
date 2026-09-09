@@ -16,7 +16,16 @@ export default defineConfig({
         theme_color: '#73c136',
         background_color: '#ffffff',
         display: 'standalone',
-        start_url: '/',
+        // '/jobs' (not '/') so relaunching the installed app/PWA lands
+        // directly on the real route. Landing on '/' first would make the
+        // client-side App.tsx redirect from '/' to '/jobs' on every cold
+        // start - a rapid route-to-route redirect during the router's very
+        // first page transition that could trip up IonRouterOutlet's
+        // enter-transition bookkeeping and leave the real page stuck
+        // invisible (repro'd: reopening the app after a first login showed
+        // a blank /jobs screen that only recovered on a manual refresh).
+        // See App.tsx's AppRoutes for the matching client-side fix.
+        start_url: '/jobs',
         icons: [
           { src: 'pwa-192x192.png', sizes: '192x192', type: 'image/png' },
           { src: 'pwa-512x512.png', sizes: '512x512', type: 'image/png' },
