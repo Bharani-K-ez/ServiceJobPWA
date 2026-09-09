@@ -25,6 +25,35 @@ import App from './App.tsx'
 
 setupIonicReact()
 
+// Self-heal the "blank page after a redeploy" bug: the service worker's
+// NavigationRoute (see vite.config.ts's workbox settings) binds EVERY
+// navigation - "/", "/jobs", anything - to a single precached index.html
+// snapshot. Right after a new build is deployed, whichever service worker
+// is still active for an already-open browser answers the very next
+// navigation with its OLD cached index.html, which references that OLD
+// build's content-hashed JS/CSS chunk filenames - files a fresh Azure
+// Static Web Apps deploy has already deleted, so they 404 and the page
+// renders blank. registerType: 'autoUpdate' means the new worker installs,
+// calls skipWaiting() and clientsClaim() automatically in the background
+// (no user action needed) - but claiming this page's clients does not, by
+// itself, re-run this page's already-loaded (now-broken) JS. Listening for
+// 'controllerchange' and reloading exactly once turns that silent handoff
+// into an automatic recovery: the moment the new worker takes control, the
+// page reloads and this time gets served by the NEW worker's matching
+// index.html + asset manifest. See public/staticwebapp.config.json for the
+// other half of this fix (no-cache on index.html/sw.js so the update is
+// actually discovered promptly).
+if ('serviceWorker' in navigator) {
+  let reloadedForNewServiceWorker = false
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (reloadedForNewServiceWorker) {
+      return
+    }
+    reloadedForNewServiceWorker = true
+    window.location.reload()
+  })
+}
+
 // The @capacitor-community/sqlite web implementation is backed by the
 // jeep-sqlite web component (SQLite compiled to WASM + IndexedDB storage).
 // It only applies on the web/PWA build - native iOS/Android use the real
