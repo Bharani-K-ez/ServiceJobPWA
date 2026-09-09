@@ -19,6 +19,7 @@ import {
   getAssetsBySite,
   getJobById,
   getServicedAssetGuidsForJob,
+  getWipAssetGuidsForJob,
   type LocalAsset,
 } from '../db/localData'
 
@@ -36,6 +37,7 @@ export default function AssetServiceListPage() {
   const location = useLocation()
   const [assets, setAssets] = useState<LocalAsset[]>([])
   const [servicedGuids, setServicedGuids] = useState<Set<string>>(new Set())
+  const [wipGuids, setWipGuids] = useState<Set<string>>(new Set())
   const [query, setQuery] = useState('')
 
   const load = useCallback(async () => {
@@ -44,6 +46,7 @@ export default function AssetServiceListPage() {
       setAssets(await getAssetsBySite(job.siteId))
     }
     setServicedGuids(await getServicedAssetGuidsForJob(id))
+    setWipGuids(await getWipAssetGuidsForJob(id))
   }, [id])
 
   // AssetServiceInfoPage's Save button (see its handleSave) navigates back
@@ -53,7 +56,10 @@ export default function AssetServiceListPage() {
   // plain useEffect keyed on `id` (unchanged across the replace) would never
   // re-run and the just-saved "Serviced" badge wouldn't show up. Reacting to
   // react-router's own `location` - which gets a new key on every
-  // navigation, replace included - is what makes it refresh.
+  // navigation, replace included - is what makes it refresh. The same
+  // applies to the silent background autosave's "WIP" badge: an autosave
+  // that lands while the technician is on this list (e.g. the unmount-flush
+  // on the way back here) needs the same refresh.
   useEffect(() => {
     if (location.pathname === `/jobs/${id}/assets`) {
       void load()
@@ -98,6 +104,10 @@ export default function AssetServiceListPage() {
         <IonList>
           {filteredAssets.map((asset) => {
             const isServiced = servicedGuids.has(asset.assetGuid)
+            // Mutually exclusive with isServiced - saveAssetServiceVisit keeps
+            // exactly one asset_service_history row per (assetGuid, serRecId),
+            // so it's never status 0 and 1 at once (see getWipAssetGuidsForJob).
+            const isWip = wipGuids.has(asset.assetGuid)
             return (
               <IonItem key={asset.assetGuid}>
                 <IonLabel className="ion-text-wrap">
@@ -106,12 +116,13 @@ export default function AssetServiceListPage() {
                   <p>{asset.serialNo ? `S/N ${asset.serialNo}` : null}</p>
                 </IonLabel>
                 {isServiced && <IonBadge color="success">Serviced</IonBadge>}
+                {isWip && <IonBadge color="warning">WIP</IonBadge>}
                 <IonButton
                   slot="end"
-                  fill={isServiced ? 'outline' : 'solid'}
+                  fill={isServiced || isWip ? 'outline' : 'solid'}
                   routerLink={`/jobs/${id}/assets/${asset.assetGuid}`}
                 >
-                  {isServiced ? 'Update' : 'Service'}
+                  {isServiced || isWip ? 'Update' : 'Service'}
                 </IonButton>
               </IonItem>
             )

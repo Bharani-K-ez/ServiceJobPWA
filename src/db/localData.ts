@@ -915,6 +915,26 @@ export async function getServicedAssetGuidsForJob(serRecId: number): Promise<Set
   return new Set(rows.map((r) => r.assetGuid))
 }
 
+/**
+ * The set of assetGuids marked "WIP" (status = 0 - only a silent background
+ * autosave has happened, no explicit Save yet, or the technician touched an
+ * already-Saved form again without re-Saving) for this job - used by
+ * AssetServiceListPage to badge an asset as in-progress. Since
+ * saveAssetServiceVisit keeps exactly one asset_service_history row per
+ * (assetGuid, serRecId) - status 0 and 1 are mutually exclusive on that row,
+ * never both at once - an assetGuid returned here is never also in
+ * getServicedAssetGuidsForJob's result for the same job.
+ */
+export async function getWipAssetGuidsForJob(serRecId: number): Promise<Set<string>> {
+  const db = await getDb()
+  const res = await db.query(
+    'SELECT DISTINCT assetGuid FROM asset_service_history WHERE serRecId = ? AND status = 0',
+    [serRecId],
+  )
+  const rows = rowsOf<{ assetGuid: string }>(res)
+  return new Set(rows.map((r) => r.assetGuid))
+}
+
 /** Every locally-saved visit not yet confirmed pushed to the server - see
  * saveAssetServiceVisit ("synced" reset to 0 on every save) and
  * UtilitiesPage.handleSync (pushes these up before pulling fresh data down). */
