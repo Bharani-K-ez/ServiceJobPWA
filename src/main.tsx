@@ -61,13 +61,37 @@ if ('serviceWorker' in navigator) {
 // half (initWebStore()).
 if (Capacitor.getPlatform() === 'web') {
   defineJeepSqlite(window)
-  window.addEventListener('DOMContentLoaded', () => {
-    const existing = document.querySelector('jeep-sqlite')
-    if (!existing) {
+
+  // Mount the <jeep-sqlite> element as soon as document.body exists, NOT
+  // gated on a 'DOMContentLoaded' listener - that event fires exactly once,
+  // and this is a deferred module script (type="module"), which the spec
+  // already runs after the document has been parsed. On a slow/cold load
+  // there's usually still time left before DOMContentLoaded fires, so the
+  // listener happens to catch it and everything works - but on a fast
+  // reload (assets served instantly from the browser/service-worker cache,
+  // e.g. exactly what happens when reopening a closed tab/installed PWA),
+  // DOMContentLoaded can fire BEFORE this script attaches the listener.
+  // addEventListener silently never calls back for an event that already
+  // fired, so <jeep-sqlite> never gets created - db/sqlite.ts's
+  // ensureWebStore()/initWebStore() then has no element to talk to and
+  // silently ends up with a fresh, disconnected in-memory database instead
+  // of restoring the real one from IndexedDB. Symptom confirmed live: after
+  // logging in and syncing down a job, closing and reopening the app showed
+  // an empty job list and getVersion reported user_version 0, even though
+  // the real data was still sitting untouched in IndexedDB - reader was
+  // just never attached to it. Mounting synchronously (falling back to the
+  // event only if the document is still mid-parse) removes the race.
+  const mountJeepSqlite = () => {
+    if (!document.querySelector('jeep-sqlite')) {
       const jeepEl = document.createElement('jeep-sqlite')
       document.body.appendChild(jeepEl)
     }
-  })
+  }
+  if (document.readyState === 'loading') {
+    window.addEventListener('DOMContentLoaded', mountJeepSqlite)
+  } else {
+    mountJeepSqlite()
+  }
 }
 
 createRoot(document.getElementById('root')!).render(
