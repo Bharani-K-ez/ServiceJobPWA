@@ -267,6 +267,19 @@ export interface LocalAssetServiceVisit {
   properties: LocalAssetServiceProperty[]
 }
 
+/** See schema.ts's job_documents table doc comment for the full field-by-field rationale. */
+export interface LocalJobDocument {
+  localId: string
+  serRecId: number
+  assetGuid: string | null
+  templateKey: string
+  dataJson: string
+  pdfFileName: string | null
+  createdAt: string
+  updatedAt: string
+  synced: boolean
+}
+
 /** value1..value50 - shared by the asset_properties column list and the
  * INSERT/mapping code below (and by dynamicFields.ts's PropColRefNo lookup). */
 export const VALUE_COLUMNS = Array.from({ length: 50 }, (_, i) => `value${i + 1}`)
@@ -957,6 +970,92 @@ export async function getPendingAssetServiceVisits(): Promise<LocalAssetServiceV
 }
 
 /**
+ * Finds the in-progress/completed document for this (serRecId, assetGuid,
+ * templateKey) triple, if one has been saved before. DocumentFormPage uses
+ * this to re-seed the template's Angular scope from a previous save instead
+ * of starting blank every time the technician reopens it.
+ */
+export async function getJobDocument(
+  serRecId: number,
+  assetGuid: string | null,
+  templateKey: string,
+): Promise<LocalJobDocument | null> {
+  const db = await getDb()
+  const res = assetGuid
+    ? await db.query(
+        'SELECT * FROM job_documents WHERE serRecId = ? AND assetGuid = ? AND templateKey = ?',
+        [serRecId, assetGuid, templateKey],
+      )
+    : await db.query(
+        'SELECT * FROM job_documents WHERE serRecId = ? AND assetGuid IS NULL AND templateKey = ?',
+        [serRecId, templateKey],
+      )
+  const rows = rowsOf<Record<string, unknown>>(res)
+  return rows[0] ? mapJobDocumentRow(rows[0]) : null
+}
+
+export async function getJobDocumentsForJob(serRecId: number): Promise<LocalJobDocument[]> {
+  const db = await getDb()
+  const res = await db.query(
+    'SELECT * FROM job_documents WHERE serRecId = ? ORDER BY updatedAt DESC',
+    [serRecId],
+  )
+  return rowsOf<Record<string, unknown>>(res).map(mapJobDocumentRow)
+}
+
+/**
+ * Saves (inserts or, for a repeat save of the same document, updates in
+ * place) the technician's current progress on a generated document.
+ * Mirrors saveAssetServiceVisit's find-existing-by-natural-key pattern
+ * rather than always inserting, so reopening and re-saving the same
+ * document amends it instead of piling up duplicate rows. Always resets
+ * `synced` back to 0 - there's no upload step wired up yet (see
+ * schema.ts's doc comment on that column), but when there is, this is the
+ * same "any local edit means it needs to go up again" rule
+ * saveAssetServiceVisit already uses for asset_service_history.
+ */
+export async function saveJobDocument(input: {
+  serRecId: number
+  assetGuid: string | null
+  templateKey: string
+  dataJson: string
+  pdfFileName?: string | null
+}): Promise<string> {
+  const db = await getDb()
+  const existing = await getJobDocument(input.serRecId, input.assetGuid, input.templateKey)
+  const localId = existing?.localId ?? crypto.randomUUID()
+  const now = new Date().toISOString()
+
+  // Preserve a previously-generated PDF's filename across a save that
+  // doesn't itself (re)generate one - e.g. editing field values again after
+  // already producing a PDF shouldn't silently forget it.
+  const pdfFileName = input.pdfFileName !== undefined ? input.pdfFileName : (existing?.pdfFileName ?? null)
+
+  await db.run(
+    `INSERT INTO job_documents (localId, serRecId, assetGuid, templateKey, dataJson, pdfFileName, createdAt, updatedAt, synced)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+     ON CONFLICT(localId) DO UPDATE SET
+       dataJson = excluded.dataJson,
+       pdfFileName = excluded.pdfFileName,
+       updatedAt = excluded.updatedAt,
+       synced = 0`,
+    [
+      localId,
+      input.serRecId,
+      input.assetGuid,
+      input.templateKey,
+      input.dataJson,
+      pdfFileName,
+      existing?.createdAt ?? now,
+      now,
+    ],
+  )
+
+  await persist()
+  return localId
+}
+
+/**
  * Applies a SyncAssetServiceUp response back to local storage: marks each
  * successfully-pushed visit synced (so it isn't pushed again next time) and
  * backfills the server-assigned AssetPropId onto local property rows that
@@ -1119,5 +1218,12 @@ function mapAssetServicePropertyRow(row: Record<string, unknown>): LocalAssetSer
   return {
     ...(row as unknown as LocalAssetServiceProperty),
     serviceFlag: Boolean(row.serviceFlag),
+  }
+}
+
+function mapJobDocumentRow(row: Record<string, unknown>): LocalJobDocument {
+  return {
+    ...(row as unknown as LocalJobDocument),
+    synced: Boolean(row.synced),
   }
 }

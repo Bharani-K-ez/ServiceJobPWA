@@ -8,6 +8,7 @@ import JobListPage from './screens/JobListPage'
 import WipPage from './screens/WipPage'
 import AssetServiceListPage from './screens/AssetServiceListPage'
 import AssetServiceInfoPage from './screens/AssetServiceInfoPage'
+import DocumentFormPage from './screens/DocumentFormPage'
 import UtilitiesPage from './screens/UtilitiesPage'
 
 function RequireAuth({ children }: { children: ReactNode }) {
@@ -90,6 +91,14 @@ function AppRoutes() {
           element={
             <RequireAuth>
               <AssetServiceInfoPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/jobs/:serRecId/documents/:templateKey"
+          element={
+            <RequireAuth>
+              <DocumentFormPage />
             </RequireAuth>
           }
         />

@@ -208,6 +208,40 @@ export const SCHEMA_STATEMENTS: string[] = [
     value41 TEXT, value42 TEXT, value43 TEXT, value44 TEXT, value45 TEXT,
     value46 TEXT, value47 TEXT, value48 TEXT, value49 TEXT, value50 TEXT
   );`,
+  /**
+   * One row per completed (or in-progress) generated document - the
+   * "capture inputs from an HTML template, produce a docket/report" feature
+   * (see docTemplates/ and DocumentFormPage.tsx). Modeled after
+   * asset_service_history above: a stable app-generated localId, found and
+   * updated in place on repeat saves of the same (serRecId, assetGuid,
+   * templateKey) rather than inserting a new row every time the technician
+   * reopens and re-saves the same document.
+   *
+   * - dataJson: the filled-in AngularJS scope's `data` object (everything
+   *   the technician entered into the template's ng-model fields, plus the
+   *   two signature images as data URLs), JSON-stringified. This is the
+   *   editable source of truth - reopening the document re-seeds the
+   *   template's scope from this instead of blank.
+   * - pdfFileName: set once a PDF has been generated for this row (see
+   *   generatePdf.ts) - relative to Filesystem Directory.Data, not an
+   *   absolute path, since that base path differs per platform/install.
+   *   NULL until the technician completes the document (a document can be
+   *   saved as a draft - dataJson populated - before a PDF exists).
+   * - synced: mirrors asset_service_history's own flag - reserved for a
+   *   future "upload the finished document to the server" step, not wired
+   *   up to anything yet. Always 0 for now.
+   */
+  `CREATE TABLE IF NOT EXISTS job_documents (
+    localId TEXT PRIMARY KEY NOT NULL,
+    serRecId INTEGER NOT NULL,
+    assetGuid TEXT,
+    templateKey TEXT NOT NULL,
+    dataJson TEXT NOT NULL,
+    pdfFileName TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL,
+    synced INTEGER NOT NULL DEFAULT 0
+  );`,
 ]
 
 /**

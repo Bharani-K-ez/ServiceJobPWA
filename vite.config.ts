@@ -71,6 +71,17 @@ export default defineConfig({
         // Never cache calls to the API - the PWA offline story here is
         // "app shell works offline", not "API responses are cached blindly".
         navigateFallbackDenylist: [/^\/api\//],
+        // Default precache limit is 2 MiB per file. The document-generation
+        // feature's vendored template libraries (public/templates/vendor/
+        // jquery+angular+bootstrap) and the main app bundle are comfortably
+        // under that, but html2canvas/jsPDF are dynamically imported (see
+        // DocumentFormPage.tsx's handleGeneratePdf) into their own chunk
+        // specifically so they don't need to be precached at all - a
+        // technician who has never generated a PDF shouldn't have to
+        // download that chunk for offline use. Raised a bit anyway as
+        // headroom for future template/vendor assets rather than tuning
+        // this every time a bundle nudges past the default.
+        maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
       },
       devOptions: {
         // Lets you test install/offline behaviour with `npm run dev` too,

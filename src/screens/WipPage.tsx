@@ -30,11 +30,19 @@ import {
   type LocalSite,
 } from '../db/localData'
 import { completeJobOnServer, pauseJobOnServer } from '../api/syncV2'
+import { DOC_TEMPLATES } from '../docTemplates/registry'
 
 /**
- * Work In Progress shell. Only "Asset Service" and "Complete Job" are wired
- * up per the current spec - Create Document and Add Parts are shown as
- * disabled placeholders ("added one by one in future").
+ * Work In Progress shell. "Asset Service", "Complete Job" and "Create
+ * Document" are wired up - Add Parts is still a disabled placeholder
+ * ("added one by one in future").
+ *
+ * Create Document offers every job-level bundled template (see
+ * docTemplates/registry.ts's assetScoped doc comment - documents here are
+ * not tied to any specific asset) - currently just one, so this renders a
+ * single button reusing the same "Create Document" label rather than each
+ * template's own title; a second job-level template would show as a second
+ * button here with no other change needed.
  */
 export default function WipPage() {
   const { serRecId } = useParams<{ serRecId: string }>()
@@ -47,6 +55,8 @@ export default function WipPage() {
   const [busy, setBusy] = useState(false)
   const [busyMessage, setBusyMessage] = useState('Completing job…')
   const [error, setError] = useState<string | null>(null)
+
+  const jobDocTemplates = DOC_TEMPLATES.filter((t) => !t.assetScoped)
 
   useEffect(() => {
     void (async () => {
@@ -149,9 +159,22 @@ export default function WipPage() {
                 </IonButton>
               </IonCol>
               <IonCol size="6">
-                <IonButton expand="block" fill="outline" disabled>
-                  Create Document
-                </IonButton>
+                {jobDocTemplates.length > 0 ? (
+                  jobDocTemplates.map((t) => (
+                    <IonButton
+                      key={t.key}
+                      expand="block"
+                      fill="outline"
+                      routerLink={`/jobs/${id}/documents/${t.key}`}
+                    >
+                      Create Document
+                    </IonButton>
+                  ))
+                ) : (
+                  <IonButton expand="block" fill="outline" disabled>
+                    Create Document
+                  </IonButton>
+                )}
               </IonCol>
               <IonCol size="6">
                 <IonButton expand="block" fill="outline" disabled>

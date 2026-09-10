@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
+import { App } from '@capacitor/app'
 import {
   IonBadge,
   IonButton,
@@ -106,6 +107,33 @@ export default function JobListPage() {
   useEffect(() => {
     if (location.pathname === '/jobs') {
       void load()
+    }
+  }, [location, load])
+
+  // Covers a case the location-based effect above can't: the app going to
+  // the background while already sitting on "/jobs" and coming back
+  // without React Router ever seeing a navigation (no new `location`), so
+  // that effect never re-fires. On Android specifically, whether the app
+  // process actually survives backgrounding is up to the OS - if it does,
+  // this component never remounts and nothing would otherwise reload the
+  // list at all; if the OS killed it, this is a fresh cold start and the
+  // effect above already re-fires load() on mount, but that first call can
+  // still be sitting behind a slow-to-wake native SQLite bridge call (see
+  // sqlite.ts's getDb() timeout for the matching fix on that side) with no
+  // second attempt of its own. Either way, explicitly reacting to the app
+  // actually becoming active again is a real trigger point independent of
+  // both cases, confirmed necessary by direct reproduction: closing and
+  // reopening the app left the list blank for 20+ seconds with nothing
+  // shown, and only a manual pull-to-refresh (which just calls load()
+  // again) brought the data back.
+  useEffect(() => {
+    const listenerPromise = App.addListener('resume', () => {
+      if (location.pathname === '/jobs') {
+        void load()
+      }
+    })
+    return () => {
+      void listenerPromise.then((listener) => listener.remove())
     }
   }, [location, load])
 

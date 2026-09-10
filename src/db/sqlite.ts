@@ -160,6 +160,38 @@ async function ensureWebStore(): Promise<void> {
 async function openDb(): Promise<SQLiteDBConnection> {
   await ensureWebStore()
 
+  // Reconcile this module's JS-side connection bookkeeping (isConnection()
+  // below just reads SQLiteConnection's own in-memory _connectionDict, a
+  // plain JS Map) against whatever is actually open before deciding
+  // create vs retrieve.
+  //
+  // Why this is needed: that Map only lives as long as the current page's
+  // JS runtime, but a real SQLite connection on native lives in the app's
+  // native process and outlives a page reload. LoginPage.tsx deliberately
+  // does a real `window.location.href = '/jobs'` navigation after login
+  // (see its comment - a plain React Router navigate() left the app stuck
+  // on the login screen), which wipes this module's JS state. Confirmed by
+  // direct reproduction on a real Android build: the first-login sync
+  // (still on the login page, pre-reload) already calls getDb() once to
+  // write the synced data, opening a native "servicejobs" connection; the
+  // reload then lands on a *fresh* JS module with an empty _connectionDict,
+  // so isConnection() below reports false and createConnection() fails
+  // hard with "CreateConnection: Connection servicejobs already exists" -
+  // native still has it, the fresh JS side just doesn't know.
+  // checkConnectionsConsistency() asks native/web to compare its real open
+  // connections against this module's (here, empty) list and close
+  // whatever doesn't match, so createConnection() below finds a clean
+  // slate. Confirmed safe by reading the Android plugin's own source: the
+  // mismatch path only closes the stale native connection handle - it
+  // does not touch the underlying database file or its data. A true first
+  // run, with nothing open on either side yet, is a no-op here.
+  try {
+    await sqliteConnection.checkConnectionsConsistency()
+  } catch {
+    // Non-fatal - fall through to the normal isConnection()/
+    // createConnection() logic below either way.
+  }
+
   const { result: alreadyConnected } = await sqliteConnection.isConnection(DB_NAME, false)
   const db = alreadyConnected
     ? await sqliteConnection.retrieveConnection(DB_NAME, false)
@@ -193,7 +225,29 @@ export function getDb(): Promise<SQLiteDBConnection> {
     // no way to recover short of a full reload - not even by navigating
     // away and back, since that just calls getDb() again and got the same
     // dead promise back.
-    dbPromise = openDb().catch((err) => {
+    //
+    // The whole thing (not just ensureWebStore's web-only piece) is also
+    // wrapped in raceTimeout now: confirmed by direct reproduction on a
+    // real Android build that closing/backgrounding the app and reopening
+    // it can leave openDb()'s native calls (checkConnectionsConsistency(),
+    // createConnection(), db.open() - all genuine native-bridge round
+    // trips, none of them touch jeep-sqlite/web at all) taking 20+ seconds
+    // to resolve with the screen just sitting blank and no error, only
+    // for a manual pull-to-refresh (which just calls the same load() path
+    // again) to bring the data back some seconds later. That's consistent
+    // with Android suspending/throttling delivery of the native bridge's
+    // callback while the WebView is still waking up from being
+    // backgrounded, until a real user interaction resumes it - the same
+    // shape of problem as the web/jeep-sqlite case above, just via a
+    // different mechanism, and with the same fix: bound the wait so a
+    // stuck attempt fails visibly and can be retried (see JobListPage.tsx's
+    // "resume" listener for the other half of this - it re-calls load() as
+    // soon as Capacitor's App plugin says the app is active again, instead
+    // of waiting on a user to manually pull down). 30s is deliberately
+    // generous - comfortably past the ~20s+8s worst case actually observed
+    // - so this only ever fires for a genuinely stuck attempt, not a slow
+    // but working one.
+    dbPromise = raceTimeout(openDb(), 30000).catch((err) => {
       dbPromise = null
       console.error('[sqlite] openDb failed, will retry on next call:', err)
       throw err
