@@ -31,7 +31,7 @@ jobs:
       - name: Build (pointed at the API's devtest slot)
         run: npm run build
         env:
-          VITE_API_BASE_URL: https://ezcoreapiprod-devtest.azurewebsites.net
+          VITE_API_BASE_URL: https://mobileezhubapi-g8gnhjg7arh6fraq.northeurope-01.azurewebsites.net
 
       - name: Deploy to Azure Static Web Apps
         uses: Azure/static-web-apps-deploy@v1
