@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { App } from '@capacitor/app'
 import {
@@ -39,6 +39,9 @@ const DATE_PRESETS: { value: DatePreset; label: string }[] = [
   { value: 'overdue', label: 'Overdue' },
   { value: 'unscheduled', label: 'Unscheduled' },
 ]
+
+const CHIP_STYLE: CSSProperties = { flex: '0 0 auto', maxWidth: 'none', margin: '4px 2px' }
+const CHIP_LABEL_STYLE: CSSProperties = { whiteSpace: 'nowrap', overflow: 'visible', textOverflow: 'clip' }
 
 function readViewMode(): ViewMode {
   try {
@@ -242,24 +245,29 @@ export default function JobListPage() {
           />
         </IonToolbar>
         <IonToolbar>
-          <div style={{ display: 'flex', gap: 4, overflowX: 'auto', padding: '0 8px 4px', whiteSpace: 'nowrap' }}>
+          {/* Horizontally scrolling chip row. Each chip is flex: none so the
+           * row overflows and scrolls instead of squeezing the chips (which
+           * clipped their labels on phone widths). */}
+          <div className="date-chip-row" style={{ display: 'flex', gap: 4, overflowX: 'auto', padding: '0 8px 4px', scrollbarWidth: 'none' }}>
             {DATE_PRESETS.map((p) => (
               <IonChip
                 key={p.value}
+                style={CHIP_STYLE}
                 color={dateFilter.preset === p.value ? 'primary' : 'medium'}
                 outline={dateFilter.preset !== p.value}
                 onClick={() => setDateFilter({ preset: p.value })}
               >
-                <IonLabel>{p.label}</IonLabel>
+                <IonLabel style={CHIP_LABEL_STYLE}>{p.label}</IonLabel>
               </IonChip>
             ))}
             <IonChip
+              style={CHIP_STYLE}
               color={dateFilter.preset === 'range' ? 'primary' : 'medium'}
               outline={dateFilter.preset !== 'range'}
               onClick={() => setRangeOpen(true)}
             >
               <IonIcon icon={calendarOutline} />
-              <IonLabel>{rangeLabel}</IonLabel>
+              <IonLabel style={CHIP_LABEL_STYLE}>{rangeLabel}</IonLabel>
               {dateFilter.preset === 'range' && (
                 <IonIcon
                   icon={closeCircle}
