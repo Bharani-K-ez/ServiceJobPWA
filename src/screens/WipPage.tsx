@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useCallback, useEffect, useState } from 'react'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import {
+  IonAlert,
   IonBackButton,
+  IonBadge,
   IonButton,
   IonButtons,
   IonCard,
@@ -10,8 +12,13 @@ import {
   IonContent,
   IonGrid,
   IonHeader,
+  IonIcon,
+  IonItem,
+  IonLabel,
   IonList,
+  IonListHeader,
   IonLoading,
+  IonNote,
   IonPage,
   IonRow,
   IonText,
@@ -19,117 +26,179 @@ import {
   IonToolbar,
 } from '@ionic/react'
 import {
-  getCustomerById,
-  getJobById,
-  getSiteById,
-  markJobCompletedLocally,
-  pauseJobLocally,
-  pushPendingAssetServiceVisits,
-  type LocalCustomer,
-  type LocalJob,
-  type LocalSite,
-} from '../db/localData'
-import { completeJobOnServer, pauseJobOnServer } from '../api/syncV2'
+  callOutline,
+  carOutline,
+  checkmarkDoneOutline,
+  constructOutline,
+  documentTextOutline,
+  pauseOutline,
+  peopleOutline,
+  playOutline,
+} from 'ionicons/icons'
+import { useJobDetails, useTicker } from '../hooks/useJobDetails'
+import {
+  completeCurrentJob,
+  getEmployeeTimesForJob,
+  getEngineerState,
+  getTeamCandidates,
+  pauseCurrentJob,
+  startWork,
+  travelFrom,
+  type EngineerState,
+  type JobState,
+  type LocalEmployeeTime,
+} from '../db/jobState'
+import { addPendingCompletion, pushPendingLocalChanges, tryPushPendingLocalChanges } from '../db/localData'
+import { completeJobOnServer } from '../api/syncV2'
 import { DOC_TEMPLATES } from '../docTemplates/registry'
+import { formatElapsed, formatHours, formatTime, secondsSince } from '../utils/format'
+import JobContactSheet from './JobContactSheet'
+import TravelPanel from './TravelPanel'
+
+const STATE_LABEL: Record<JobState, string> = {
+  TravelTo: 'Travelling to site',
+  'On Work': 'On site',
+  TravelFrom: 'Travelling back',
+  Unknown: 'Not under way',
+}
+
+const STATE_COLOR: Record<JobState, string> = {
+  TravelTo: 'primary',
+  'On Work': 'success',
+  TravelFrom: 'tertiary',
+  Unknown: 'medium',
+}
 
 /**
- * Work In Progress shell. "Asset Service", "Complete Job" and "Create
- * Document" are wired up - Add Parts is still a disabled placeholder
- * ("added one by one in future").
+ * Work In Progress. State-aware: the banner shows where the job is
+ * (travelling / on site / travelling back) with a live clock since the last
+ * change, the team list shows each member's running time, and the action
+ * buttons offer only the moves that make sense from the current state:
  *
- * Create Document offers every job-level bundled template (see
- * docTemplates/registry.ts's assetScoped doc comment - documents here are
- * not tied to any specific asset) - currently just one, so this renders a
- * single button reusing the same "Create Document" label rather than each
- * template's own title; a second job-level template would show as a second
- * button here with no other change needed.
+ *   TravelTo    -> Arrived (On Work) · Pause
+ *   On Work     -> Travel From · Complete · Pause · Asset Service · Create Document
+ *   TravelFrom  -> Complete · Back on site (On Work) · Pause
+ *   not current -> Resume (via TeamPage) - the job is paused
+ *
+ * Every move goes through db/jobState.ts (closing/opening EmployeeTime rows
+ * for the whole team) and is then pushed best-effort; Complete additionally
+ * calls the server's CompleteJob (asset-service history + completion email)
+ * once the push has landed, queuing it for the next Sync if offline.
  */
 export default function WipPage() {
   const { serRecId } = useParams<{ serRecId: string }>()
-  const navigate = useNavigate()
   const id = Number(serRecId)
+  const navigate = useNavigate()
+  const location = useLocation()
+  const { job, site, customer, reload } = useJobDetails(id)
 
-  const [job, setJob] = useState<LocalJob | null>(null)
-  const [site, setSite] = useState<LocalSite | null>(null)
-  const [customer, setCustomer] = useState<LocalCustomer | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [busyMessage, setBusyMessage] = useState('Completing job…')
+  const [engineer, setEngineer] = useState<EngineerState>({ currentJob: null, currentState: 'Unknown' })
+  const [times, setTimes] = useState<LocalEmployeeTime[]>([])
+  const [names, setNames] = useState<Map<string, string>>(new Map())
+  const [contactOpen, setContactOpen] = useState(false)
+  const [confirmComplete, setConfirmComplete] = useState(false)
+  const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+
+  const isCurrent = engineer.currentJob === id
+  const state: JobState = isCurrent ? engineer.currentState : 'Unknown'
+  const now = useTicker(1000, isCurrent)
 
   const jobDocTemplates = DOC_TEMPLATES.filter((t) => !t.assetScoped)
 
-  useEffect(() => {
-    void (async () => {
-      const j = await getJobById(id)
-      setJob(j)
-      if (j?.siteId != null) {
-        const s = await getSiteById(j.siteId)
-        setSite(s)
-        if (s?.custId != null) {
-          setCustomer(await getCustomerById(s.custId))
-        }
-      }
-    })()
+  const loadState = useCallback(async () => {
+    const [st, rows, candidates] = await Promise.all([getEngineerState(), getEmployeeTimesForJob(id), getTeamCandidates()])
+    setEngineer(st)
+    setTimes(rows)
+    setNames(new Map(candidates.map((c) => [c.employeeID.toLowerCase(), c.displayName])))
   }, [id])
 
-  async function handleCompleteJob() {
-    setError(null)
-    setBusyMessage('Completing job…')
-    setBusy(true)
-    try {
-      // Push this visit's saved Asset Service data up FIRST - the server
-      // builds the completion Asset Service report PDF/email from whatever
-      // data it already has for this job at the moment CompleteJob is
-      // called, so completing the job without pushing first would email a
-      // report missing (or stale for) whatever was just captured here.
-      // Shares its push logic with UtilitiesPage.handleSync - see
-      // pushPendingAssetServiceVisits. If the push fails, the job is left
-      // NOT completed (same as any other failure below) so this can just be
-      // retried.
-      const pushResult = await pushPendingAssetServiceVisits()
-      if (!pushResult.ok) {
-        setError(pushResult.message)
-        return
-      }
+  useEffect(() => {
+    if (location.pathname === `/jobs/${id}/wip`) {
+      void reload()
+      void loadState()
+    }
+  }, [location, id, reload, loadState])
 
-      const result = await completeJobOnServer(id)
-      if (!result.hasData) {
-        setError(result.failMessage ?? 'Could not mark the job as completed. Please try again.')
-        return
-      }
-      await markJobCompletedLocally(id)
-      navigate('/jobs', { replace: true })
+  const nameOf = (employeeId: string) => names.get(employeeId.toLowerCase()) ?? employeeId
+  const openRows = times.filter((t) => t.finishDt == null)
+  const closedRows = times.filter((t) => t.finishDt != null).slice().reverse()
+  const stateSince = openRows.length > 0 ? openRows.map((r) => r.startDt).sort()[0] : null
+  const labourHours = closedRows.filter((r) => r.activity === 'On Work').reduce((s, r) => s + (r.timeHours ?? 0), 0)
+  const travelHours = closedRows.filter((r) => r.activity !== 'On Work').reduce((s, r) => s + (r.timeHours ?? 0), 0)
+
+  async function move(label: string, action: () => Promise<void>) {
+    setError(null)
+    setBusy(label)
+    try {
+      await action()
+      void tryPushPendingLocalChanges()
+      await reload()
+      await loadState()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not reach the server. Try again once you have a connection.')
+      setError(err instanceof Error ? err.message : 'Could not update the job.')
     } finally {
-      setBusy(false)
+      setBusy(null)
     }
   }
 
-  /**
-   * Pauses the job server-side (DispatchStatus "40"/WIPPaused) and locally
-   * (local_status = 'paused'), then returns to the job list. Unlike
-   * completing, pausing does not push pending Asset Service data first - a
-   * paused job is still resumable and its data is still local, not final.
-   */
-  async function handlePauseJob() {
+  async function handlePause() {
     setError(null)
-    setBusyMessage('Pausing job…')
-    setBusy(true)
+    setBusy('Pausing job…')
     try {
-      const result = await pauseJobOnServer(id)
-      if (!result.hasData) {
-        setError(result.failMessage ?? 'Could not pause the job. Please try again.')
-        return
-      }
-      await pauseJobLocally(id)
+      await pauseCurrentJob()
+      void tryPushPendingLocalChanges()
       navigate('/jobs', { replace: true })
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not reach the server. Try again once you have a connection.')
+      setError(err instanceof Error ? err.message : 'Could not pause the job.')
     } finally {
-      setBusy(false)
+      setBusy(null)
     }
   }
+
+  async function handleComplete() {
+    setError(null)
+    setBusy('Completing job…')
+    try {
+      // 1. Close every team member's time row and stamp the job 50 locally -
+      //    this works offline and is the source of truth for the hours.
+      await completeCurrentJob()
+
+      // 2. Push the time rows, the job status and any saved Asset Service
+      //    visits. The server builds the completion report from what it
+      //    holds at the moment CompleteJob is called, so this must land first.
+      const push = await pushPendingLocalChanges()
+      let completedOnServer = false
+      if (push.ok) {
+        try {
+          const result = await completeJobOnServer(id)
+          completedOnServer = result.hasData
+        } catch {
+          completedOnServer = false
+        }
+      }
+
+      // 3. Offline (or the server hiccupped): remember to call CompleteJob on
+      //    the next Sync so the completion email still goes out.
+      if (!completedOnServer) {
+        await addPendingCompletion(id)
+      }
+      navigate('/jobs', {
+        replace: true,
+        state: {
+          toast: completedOnServer
+            ? 'Job completed.'
+            : 'Job completed on this device. It will be sent to the office on your next Sync.',
+        },
+      })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not complete the job.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const address = [site?.occupant, site?.address, site?.town].filter(Boolean).join(', ')
 
   return (
     <IonPage>
@@ -139,69 +208,244 @@ export default function WipPage() {
             <IonBackButton defaultHref="/jobs" />
           </IonButtons>
           <IonTitle>{job?.docketRef ?? `Job #${id}`}</IonTitle>
+          <IonButtons slot="end">
+            <IonButton onClick={() => setContactOpen(true)}>
+              <IonIcon slot="icon-only" icon={callOutline} />
+            </IonButton>
+          </IonButtons>
         </IonToolbar>
       </IonHeader>
-      <IonContent className="ion-padding">
-        <IonCard>
+
+      <IonContent>
+        {/* State banner */}
+        <IonCard color={STATE_COLOR[state]}>
           <IonCardContent>
-            <p><strong>{customer?.organizationName}</strong></p>
-            <p>{[site?.occupant, site?.address, site?.town, site?.county].filter(Boolean).join(', ')}</p>
-            <p>{job?.probDesc}</p>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <div style={{ fontSize: 13, opacity: 0.85, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                  {STATE_LABEL[state]}
+                </div>
+                <div style={{ fontSize: 18, fontWeight: 600, marginTop: 4 }}>
+                  {customer?.organizationName ?? site?.occupant ?? ''}
+                </div>
+                <div style={{ fontSize: 14, marginTop: 2 }}>{address}</div>
+              </div>
+              {isCurrent && stateSince && (
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: 28, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
+                    {formatElapsed(secondsSince(stateSince, now))}
+                  </div>
+                  <div style={{ fontSize: 12, opacity: 0.85 }}>since {formatTime(stateSince)}</div>
+                </div>
+              )}
+            </div>
           </IonCardContent>
         </IonCard>
 
-        <IonList inset>
-          <IonGrid>
-            <IonRow>
-              <IonCol size="6">
-                <IonButton expand="block" fill="outline" routerLink={`/jobs/${id}/assets`}>
-                  Asset Service
-                </IonButton>
-              </IonCol>
-              <IonCol size="6">
-                {jobDocTemplates.length > 0 ? (
-                  jobDocTemplates.map((t) => (
-                    <IonButton
-                      key={t.key}
-                      expand="block"
-                      fill="outline"
-                      routerLink={`/jobs/${id}/documents/${t.key}`}
-                    >
-                      Create Document
-                    </IonButton>
-                  ))
-                ) : (
-                  <IonButton expand="block" fill="outline" disabled>
-                    Create Document
-                  </IonButton>
-                )}
-              </IonCol>
-              <IonCol size="6">
-                <IonButton expand="block" fill="outline" disabled>
-                  Add Parts
-                </IonButton>
-              </IonCol>
-              <IonCol size="6">
-                <IonButton expand="block" color="success" onClick={handleCompleteJob}>
-                  Complete Job
-                </IonButton>
-              </IonCol>
-              <IonCol size="12">
-                <IonButton expand="block" fill="outline" color="medium" onClick={handlePauseJob}>
-                  Pause Job
-                </IonButton>
-              </IonCol>
-            </IonRow>
-          </IonGrid>
-        </IonList>
+        {isCurrent && state === 'TravelTo' && <TravelPanel serRecId={id} site={site} />}
 
-        {error && (
-          <IonText color="danger">
-            <p className="ion-padding-start">{error}</p>
+        {job?.probDesc && (
+          <IonText>
+            <p className="ion-padding-horizontal" style={{ whiteSpace: 'pre-wrap', marginTop: 0 }}>
+              {job.probDesc}
+            </p>
           </IonText>
         )}
 
-        <IonLoading isOpen={busy} message={busyMessage} />
+        {!isCurrent && job && (
+          <IonText color="medium">
+            <p className="ion-padding-horizontal" style={{ fontSize: 14 }}>
+              {job.localStatus === 'completed'
+                ? 'This job has been completed on this device.'
+                : 'This job is paused. Resume it to start recording time again.'}
+            </p>
+          </IonText>
+        )}
+
+        {/* Team + live timers */}
+        <IonList inset>
+          <IonListHeader>
+            <IonLabel>Team</IonLabel>
+            {isCurrent && (
+              <IonButton fill="clear" size="small" onClick={() => navigate(`/jobs/${id}/team`)}>
+                <IonIcon slot="start" icon={peopleOutline} />
+                Manage
+              </IonButton>
+            )}
+          </IonListHeader>
+          {openRows.length === 0 && (
+            <IonItem lines="none">
+              <IonLabel color="medium">No one is clocked on to this job right now.</IonLabel>
+            </IonItem>
+          )}
+          {openRows.map((row) => (
+            <IonItem key={row.guid}>
+              <IonLabel>
+                <h2>{nameOf(row.employeeId)}</h2>
+                <p>
+                  {STATE_LABEL[(row.activity as JobState) ?? 'Unknown'] ?? row.activity} · from {formatTime(row.startDt)}
+                </p>
+              </IonLabel>
+              <IonNote slot="end" style={{ fontVariantNumeric: 'tabular-nums', fontSize: 16 }}>
+                {formatElapsed(secondsSince(row.startDt, now))}
+              </IonNote>
+            </IonItem>
+          ))}
+        </IonList>
+
+        {/* Actions */}
+        <IonGrid className="ion-padding-horizontal">
+          {!isCurrent && job && job.localStatus !== 'completed' && (
+            <IonRow>
+              <IonCol size="6">
+                <IonButton expand="block" fill="outline" onClick={() => navigate(`/jobs/${id}/team?state=TravelTo`)}>
+                  <IonIcon slot="start" icon={carOutline} />
+                  Travel To
+                </IonButton>
+              </IonCol>
+              <IonCol size="6">
+                <IonButton expand="block" color="success" onClick={() => navigate(`/jobs/${id}/team?state=On%20Work`)}>
+                  <IonIcon slot="start" icon={playOutline} />
+                  Resume Job
+                </IonButton>
+              </IonCol>
+            </IonRow>
+          )}
+
+          {isCurrent && (
+            <>
+              <IonRow>
+                {state === 'TravelTo' && (
+                  <IonCol size="12">
+                    <IonButton expand="block" color="success" onClick={() => void move('Starting work…', () => startWork(id))}>
+                      <IonIcon slot="start" icon={constructOutline} />
+                      Arrived - Start Work
+                    </IonButton>
+                  </IonCol>
+                )}
+                {state === 'On Work' && (
+                  <>
+                    <IonCol size="6">
+                      <IonButton expand="block" fill="outline" onClick={() => void move('Starting travel…', () => travelFrom(id))}>
+                        <IonIcon slot="start" icon={carOutline} />
+                        Travel From
+                      </IonButton>
+                    </IonCol>
+                    <IonCol size="6">
+                      <IonButton expand="block" color="success" onClick={() => setConfirmComplete(true)}>
+                        <IonIcon slot="start" icon={checkmarkDoneOutline} />
+                        Complete Job
+                      </IonButton>
+                    </IonCol>
+                  </>
+                )}
+                {state === 'TravelFrom' && (
+                  <>
+                    <IonCol size="6">
+                      <IonButton expand="block" fill="outline" onClick={() => void move('Starting work…', () => startWork(id))}>
+                        <IonIcon slot="start" icon={constructOutline} />
+                        Back on site
+                      </IonButton>
+                    </IonCol>
+                    <IonCol size="6">
+                      <IonButton expand="block" color="success" onClick={() => setConfirmComplete(true)}>
+                        <IonIcon slot="start" icon={checkmarkDoneOutline} />
+                        Complete Job
+                      </IonButton>
+                    </IonCol>
+                  </>
+                )}
+              </IonRow>
+
+              {state === 'On Work' && (
+                <IonRow>
+                  <IonCol size="6">
+                    <IonButton expand="block" fill="outline" routerLink={`/jobs/${id}/assets`}>
+                      Asset Service
+                    </IonButton>
+                  </IonCol>
+                  <IonCol size="6">
+                    {jobDocTemplates.length > 0 ? (
+                      jobDocTemplates.map((t) => (
+                        <IonButton key={t.key} expand="block" fill="outline" routerLink={`/jobs/${id}/documents/${t.key}`}>
+                          <IonIcon slot="start" icon={documentTextOutline} />
+                          Create Document
+                        </IonButton>
+                      ))
+                    ) : (
+                      <IonButton expand="block" fill="outline" disabled>
+                        Create Document
+                      </IonButton>
+                    )}
+                  </IonCol>
+                </IonRow>
+              )}
+
+              <IonRow>
+                <IonCol size="12">
+                  <IonButton expand="block" fill="outline" color="medium" onClick={() => void handlePause()}>
+                    <IonIcon slot="start" icon={pauseOutline} />
+                    Pause Job
+                  </IonButton>
+                </IonCol>
+              </IonRow>
+            </>
+          )}
+        </IonGrid>
+
+        {error && (
+          <IonText color="danger">
+            <p className="ion-padding-horizontal">{error}</p>
+          </IonText>
+        )}
+
+        {/* Time log */}
+        {closedRows.length > 0 && (
+          <IonList inset>
+            <IonListHeader>
+              <IonLabel>Time recorded</IonLabel>
+              <IonNote style={{ paddingRight: 16 }}>
+                {formatHours(labourHours)} on site · {formatHours(travelHours)} travel
+              </IonNote>
+            </IonListHeader>
+            {closedRows.map((row) => (
+              <IonItem key={row.guid}>
+                <IonLabel>
+                  <h2>{nameOf(row.employeeId)}</h2>
+                  <p>
+                    {STATE_LABEL[(row.activity as JobState) ?? 'Unknown'] ?? row.activity} · {formatTime(row.startDt)} –{' '}
+                    {formatTime(row.finishDt)}
+                  </p>
+                </IonLabel>
+                <IonNote slot="end">{formatHours(row.timeHours ?? 0)}</IonNote>
+                {!row.sent && (
+                  <IonBadge slot="end" color="light">
+                    unsent
+                  </IonBadge>
+                )}
+              </IonItem>
+            ))}
+          </IonList>
+        )}
+
+        <JobContactSheet isOpen={contactOpen} onDismiss={() => setContactOpen(false)} site={site} customer={customer} />
+
+        <IonAlert
+          isOpen={confirmComplete}
+          header="Complete this job?"
+          message={
+            openRows.length > 1
+              ? `Time will be closed for all ${openRows.length} team members and the job sent to the office.`
+              : 'Time will be closed and the job sent to the office.'
+          }
+          buttons={[
+            { text: 'Cancel', role: 'cancel' },
+            { text: 'Complete', role: 'confirm', handler: () => void handleComplete() },
+          ]}
+          onDidDismiss={() => setConfirmComplete(false)}
+        />
+
+        <IonLoading isOpen={busy !== null} message={busy ?? undefined} />
       </IonContent>
     </IonPage>
   )

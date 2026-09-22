@@ -1,14 +1,27 @@
 import { httpClient } from './httpClient'
 import type { ApiResult } from './types'
-import type { SyncUpRequestDto, SyncUpResponseDto, SyncV2ResponseDto } from './syncV2Types'
+import type {
+  SyncDownRequestDto,
+  SyncUpRequestDto,
+  SyncUpResponseDto,
+  SyncV2ResponseDto,
+} from './syncV2Types'
 
 /**
- * GET /api/MobileV2/SyncV2/SyncDown - this engineer's open jobs plus the
- * related sites/customers/assets. See SyncV2Controller.cs on the API side.
+ * POST /api/MobileV2/SyncV2/SyncDown - everything the app stores locally for
+ * this engineer, either in full (`fullSync: true`) or as a delta since the
+ * `syncDateTime` the server returned last time (`fullSync: false` +
+ * `lastSyncTime` + the job/site ids the app already holds). See
+ * SyncV2Controller.cs / SyncDownV2Request.cs on the API side.
+ *
+ * Call sites should not build the request by hand - use
+ * db/localData.ts's syncDownAndStore(), which reads the local state the
+ * request needs and applies the response.
  */
-export async function syncDown(): Promise<ApiResult<SyncV2ResponseDto>> {
-  const { data } = await httpClient.get<ApiResult<SyncV2ResponseDto>>(
+export async function syncDown(request: SyncDownRequestDto): Promise<ApiResult<SyncV2ResponseDto>> {
+  const { data } = await httpClient.post<ApiResult<SyncV2ResponseDto>>(
     '/api/MobileV2/SyncV2/SyncDown',
+    request,
   )
   return data
 }
@@ -34,9 +47,9 @@ export async function pauseJobOnServer(serRecID: number): Promise<ApiResult<bool
 /**
  * POST /api/MobileV2/SyncV2/SyncUp - the single common endpoint the app
  * pushes ALL locally-saved data up through, regardless of which feature
- * produced it (only `assetService` exists today - see SyncUpRequestDto's
- * doc comment for how a future transaction type gets added here without a
- * new endpoint or a new client function). See SyncV2Controller.SyncUp /
+ * produced it (see SyncUpRequestDto's doc comment for the tables and how
+ * a future transaction type gets added without a new endpoint or a new
+ * client function). See SyncV2Controller.SyncUp /
  * SyncV2Service.SyncUp on the API side; called from UtilitiesPage.handleSync
  * before the existing syncDown() pull.
  */

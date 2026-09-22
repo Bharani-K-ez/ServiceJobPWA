@@ -93,6 +93,21 @@ export async function clearOfflineSessionAccount(): Promise<void> {
 }
 
 /**
+ * The username of the engineer signed in on this device - the login name,
+ * which is also the Employee.EmployeeID / ServiceRecord.DispatchEng value
+ * the server uses for them (see SyncV2Controller's note on EngName). Used
+ * by db/jobState.ts to put the engineer on their own team. Reads the last
+ * account that completed an online login here (always written by
+ * api/auth.ts on success), falling back to the offline-session marker.
+ */
+export async function getCurrentUsername(): Promise<string | null> {
+  const saved = await getSavedCredentials()
+  if (saved?.username) return saved.username
+  const offline = await getOfflineSessionAccount()
+  return offline?.username ?? null
+}
+
+/**
  * The "Save password" toggle on LoginPage - entirely separate from
  * SavedCredentials above. That one is saved automatically after every
  * successful online login (to power the offline-login check) and only ever

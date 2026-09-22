@@ -5,11 +5,14 @@ import { Navigate, Route } from 'react-router-dom'
 import { AuthProvider, useAuth } from './auth/AuthContext'
 import LoginPage from './screens/LoginPage'
 import JobListPage from './screens/JobListPage'
+import JobDetailPage from './screens/JobDetailPage'
+import TeamPage from './screens/TeamPage'
 import WipPage from './screens/WipPage'
 import AssetServiceListPage from './screens/AssetServiceListPage'
 import AssetServiceInfoPage from './screens/AssetServiceInfoPage'
 import DocumentFormPage from './screens/DocumentFormPage'
 import UtilitiesPage from './screens/UtilitiesPage'
+import DevDbPage from './screens/DevDbPage'
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { status } = useAuth()
@@ -71,6 +74,22 @@ function AppRoutes() {
           }
         />
         <Route
+          path="/jobs/:serRecId"
+          element={
+            <RequireAuth>
+              <JobDetailPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/jobs/:serRecId/team"
+          element={
+            <RequireAuth>
+              <TeamPage />
+            </RequireAuth>
+          }
+        />
+        <Route
           path="/jobs/:serRecId/wip"
           element={
             <RequireAuth>
@@ -110,6 +129,19 @@ function AppRoutes() {
             </RequireAuth>
           }
         />
+        {/* Dev-only local SQLite browser. `import.meta.env.DEV` is a
+         * compile-time constant, so in a production build this whole route
+         * (and DevDbPage's code) is eliminated by Vite. */}
+        {import.meta.env.DEV && (
+          <Route
+            path="/dev/db"
+            element={
+              <RequireAuth>
+                <DevDbPage />
+              </RequireAuth>
+            }
+          />
+        )}
       </IonRouterOutlet>
     </IonReactRouter>
   )

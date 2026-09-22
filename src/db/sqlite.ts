@@ -275,3 +275,22 @@ export async function persist(): Promise<void> {
   }
   await sqliteConnection.saveToStore(DB_NAME)
 }
+
+/**
+ * Rolls back a transaction left open by an earlier operation that died
+ * between BEGIN and COMMIT (and whose own rollback failed too). Without
+ * this, every later transactional call on the shared connection - run(),
+ * executeSet(), beginTransaction() - fails with "cannot start a transaction
+ * within a transaction" until the app is reloaded. Call it right before
+ * starting a transaction of your own. Harmless when nothing is open.
+ */
+export async function clearStaleTransaction(db: SQLiteDBConnection): Promise<void> {
+  try {
+    const active = await db.isTransactionActive()
+    if (active.result) {
+      await db.rollbackTransaction()
+    }
+  } catch {
+    // isTransactionActive is not supported everywhere - nothing to clear then
+  }
+}

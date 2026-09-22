@@ -16,8 +16,7 @@ import {
 import { login } from '../api/auth'
 import { getTenantCode, clearTenantCode } from '../api/tenant'
 import { getRememberedLogin, saveRememberedLogin, clearRememberedLogin } from '../api/localAuth'
-import { syncDown } from '../api/syncV2'
-import { upsertSyncData } from '../db/localData'
+import { syncDownAndStore } from '../db/localData'
 import { useAuth } from '../auth/AuthContext'
 
 /**
@@ -123,15 +122,11 @@ export default function LoginPage() {
         // off local SQLite data only; a manual "Sync data to server" in
         // Utilities is the only way to resync going forward.
         setBusyMessage('Syncing your jobs…')
-        try {
-          const syncResult = await syncDown()
-          if (syncResult.hasData && syncResult.data) {
-            await upsertSyncData(syncResult.data)
-          }
-        } catch {
-          // Login already succeeded - let them into the app and sync
-          // later from Utilities rather than blocking them here.
-        }
+        // A full sync - this device has nothing for this account yet. Any
+        // failure is deliberately ignored: login already succeeded, so let
+        // them into the app and sync later from Utilities rather than
+        // blocking them here (syncDownAndStore returns errors, never throws).
+        await syncDownAndStore('full')
       }
 
       // A plain React Router navigate() here left the app stuck showing this

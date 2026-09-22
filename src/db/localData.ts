@@ -1,16 +1,31 @@
-import { getDb, persist } from './sqlite'
-import { syncUp } from '../api/syncV2'
+import { clearStaleTransaction, getDb, persist } from './sqlite'
+import { syncDown, syncUp } from '../api/syncV2'
+import { completeJobOnServer } from '../api/syncV2'
 import type {
+  EmployeeTimeUpDto,
+  JobUpDto,
+  LiveSyncUpDto,
   SyncV2AssetDto,
   SyncV2AssetPropertyDto,
   SyncV2CommonCategoryDto,
   SyncV2CommonCategoryPropDto,
   SyncV2CustomerDto,
+  SyncV2EmployeeDto,
+  SyncV2EmployeeTimeDto,
+  SyncDownRequestDto,
   SyncV2ResponseDto,
   SyncV2SiteDto,
 } from '../api/syncV2Types'
 
-export type LocalJobStatus = 'open' | 'wip' | 'paused' | 'completed'
+/**
+ * App-side workflow state of a job, kept next to the legacy DispatchStatus:
+ *  open      - not started on this device
+ *  wip       - the device's current job (db/jobState.ts; DispatchStatus 30/35/37)
+ *  paused    - started, then paused (DispatchStatus 40)
+ *  completed - completed on the device (DispatchStatus 50) - hidden from the list
+ *  declined  - declined on the device (DispatchStatus 04) - hidden from the list
+ */
+export type LocalJobStatus = 'open' | 'wip' | 'paused' | 'completed' | 'declined'
 
 export interface LocalJob {
   serRecId: number
@@ -288,27 +303,110 @@ function rowsOf<T>(res: { values?: unknown[] }): T[] {
   return (res.values ?? []) as T[]
 }
 
+// Column lists of the legacy-named core tables, in schema.ts order (minus
+// ServiceRecord's app-only local_* columns). Kept here, next to the code
+// that writes them, so an added column is a two-line change (schema + list).
+const SERVICE_RECORD_COLUMNS = [
+  'SerRecID', 'SiteSystemID', 'DocketRef', 'SiteID', 'CallReceivedDT', 'CallType', 'ProbDesc',
+  'StartDT', 'FinishDT', 'Status', 'Completed', 'ServiceType', 'Description', 'Report',
+  'DatePromisedDT', 'Time_Frame', 'ScheduledDate', 'ScheduledEndDate', 'SchDays', 'SchHours',
+  'SchMinutes', 'CallerName', 'PrevMaintCarriedOut', 'EmpIDs', 'CallModifiedBy', 'CallModifiedOn',
+  'System', 'Updated', 'JobNumber', 'Priority', 'DispatchEng', 'DispatchStatus',
+  'DispatchStatusDesc', 'TimeEst', 'Labour', 'CallToConfirm', 'Installation', 'Maintenancectrl',
+  'EmergencyService', 'TemporaryDC', 'Cause', 'Sent', 'SerRec_GUID', 'RiskAssessment',
+  'RiskAssessmentDate', 'Deleted', 'ReferenceJob', 'CustContID', 'DocTempMapping',
+] as const
+
+const ALARM_SITE_COLUMNS = [
+  'SiteID', 'SiteRef', 'Address', 'Town', 'County', 'AreaCode', 'Telephone', 'PostCode', 'CustID',
+  'CommissionedBy', 'DateInstalled', 'InstalledYN', 'MonCompany', 'CPanelProdID', 'PanelLocation',
+  'Occupant', 'GardaURN', 'Installer', 'DigiNo', 'RenewalDate', 'MonFee', 'LastModified',
+  'ModifiedBy', 'CustomerType', 'RadioID', 'LabourRate', 'PercentRate', 'Updated', 'ContractNo',
+  'Latitude', 'Longitude', 'Note', 'Email_Site', 'SC_Emails', 'UserDefined1', 'UserDefined2',
+  'UserDefined3', 'UserDefined4', 'Password', 'UserCode', 'Alarmsite_GUID', 'Deleted', 'Sent',
+  'DigiType', 'EngCode', 'SiteSMSNumbers', 'PremiseType', 'AlarmType', 'URNAppliedForDate',
+  'NSAICertNo', 'FireAuthority', 'PoliceAuthority', 'InstallationId',
+] as const
+
+const CUSTOMER_COLUMNS = [
+  'CustID', 'AccountsRef', 'Prefix', 'FirstName', 'LastName', 'EmailAddress', 'OrganizationName',
+  'Address', 'Town', 'County', 'Country', 'AreaCode', 'HomePhone', 'MobilePhone', 'WorkPhone',
+  'DirectDebit', 'Updated', 'Deleted',
+] as const
+
+const TBL_ASSET_COLUMNS = [
+  'AssetGUID', 'AssetName', 'AssetDesc', 'AssetType', 'ContractID', 'MaintIntervalUnit',
+  'MaintInterval', 'TemplateID', 'SiteID', 'IsRental', 'NextServiceDate', 'LastServiceDate',
+  'Location', 'SerialNo', 'Number', 'AssetModel', 'InstallDate', 'CreatedOn', 'CreatedBy',
+  'UpdatedOn', 'UpdatedBy', 'IsActive', 'LockedDateTime', 'IsLocked', 'LockedByUser',
+  'LockedSerRecId', 'IsRequired',
+  // Sent / Deleted exist on the legacy local table but not in the sync
+  // payload - left out of the INSERT so the schema default (0) applies.
+] as const
+
+const EMPLOYEE_COLUMNS = [
+  'EmployeeID', 'Title', 'FirstName', 'MiddleName', 'LastName', 'MobilePhone', 'WorkPhone',
+  'IsEngineer', 'Updated',
+] as const
+
+function placeholders(count: number): string {
+  return Array.from({ length: count }, () => '?').join(', ')
+}
+
+/** Column name -> the SyncV2 DTO key httpClient produces for it (first letter lower-cased). */
+function dtoKey(column: string): string {
+  return column.charAt(0).toLowerCase() + column.slice(1)
+}
+
+/** Reads a DTO in schema column order, storing booleans as 0/1 and undefined as NULL. */
+function columnValues(dto: object, columns: readonly string[]): unknown[] {
+  const record = dto as Record<string, unknown>
+  return columns.map((column) => {
+    const value = record[dtoKey(column)]
+    if (value === undefined) return null
+    if (typeof value === 'boolean') return value ? 1 : 0
+    return value
+  })
+}
+
 /**
- * Replaces the local jobs/sites/customers/assets tables with the latest
- * sync bundle from the server, in one transaction. Each job's local-only
- * workflow state (local_status / local_completed_at) is looked up by
- * serRecId before the table is cleared and reapplied after the new rows are
- * inserted, so a job the engineer already started (or completed but hasn't
- * dropped off the next sync yet) doesn't lose that state under their feet.
+ * Applies a SyncDown bundle to the local tables in one transaction. The four
+ * core tables are the legacy MAUI names (ServiceRecord / AlarmSite /
+ * Customer / TblAsset) with the legacy column spellings.
+ *
+ *  - data.fullSync = true:  the synced tables are cleared and re-filled
+ *    (the original "replace everything" behaviour).
+ *  - data.fullSync = false: a delta - rows in the bundle are upserted
+ *    (INSERT OR REPLACE on each table's primary key) over what's already
+ *    here, nothing else is touched, and the jobs in data.delJobIds are
+ *    removed because they are no longer this engineer's.
+ *
+ * In both modes each job's local-only workflow state (local_status /
+ * local_completed_at) is looked up by serRecId first and reapplied to the
+ * incoming row, so a job the engineer already started (or completed but
+ * hasn't dropped off the next sync yet) doesn't lose that state under their
+ * feet. The server's syncDateTime is stored as `serverSyncDateTime` and sent
+ * back as lastSyncTime on the next partial sync (see buildSyncDownRequest).
  */
 export async function upsertSyncData(data: SyncV2ResponseDto): Promise<void> {
   const db = await getDb()
 
   const existingStatusRes = await db.query(
-    'SELECT serRecId, local_status, local_completed_at FROM jobs',
+    'SELECT SerRecID, local_status, local_completed_at FROM ServiceRecord',
   )
   const existingStatus = new Map<number, { status: LocalJobStatus; completedAt: string | null }>()
-  for (const row of rowsOf<{ serRecId: number; local_status: LocalJobStatus; local_completed_at: string | null }>(
+  for (const row of rowsOf<{ SerRecID: number; local_status: LocalJobStatus; local_completed_at: string | null }>(
     existingStatusRes,
   )) {
-    existingStatus.set(row.serRecId, { status: row.local_status, completedAt: row.local_completed_at })
+    existingStatus.set(row.SerRecID, { status: row.local_status, completedAt: row.local_completed_at })
   }
 
+  // Full sync = wipe and refill; partial = upsert over what's here. Every
+  // synced table has a primary key (see schema.ts), which is what makes
+  // INSERT OR REPLACE a correct merge.
+  const insert = data.fullSync ? 'INSERT' : 'INSERT OR REPLACE'
+
+  await clearStaleTransaction(db)
   await db.beginTransaction()
   try {
     // transaction=false on every statement below: the outer beginTransaction()
@@ -316,47 +414,50 @@ export async function upsertSyncData(data: SyncV2ResponseDto): Promise<void> {
     // to wrapping themselves in their own implicit transaction, which fights
     // with (and can silently close) our manually-managed one - passing false
     // keeps everything inside the single explicit begin/commit/rollback.
-    await db.run('DELETE FROM jobs', [], false)
-    await db.run('DELETE FROM sites', [], false)
-    await db.run('DELETE FROM customers', [], false)
-    await db.run('DELETE FROM assets', [], false)
+    if (data.fullSync) {
+      await db.run('DELETE FROM ServiceRecord', [], false)
+      await db.run('DELETE FROM AlarmSite', [], false)
+      await db.run('DELETE FROM Customer', [], false)
+      await db.run('DELETE FROM TblAsset', [], false)
+      await db.run('DELETE FROM Employee', [], false)
+      // Time rows still waiting to go up (Sent = 0) are the device's own
+      // work and must survive a full refresh; everything else is re-sent.
+      await db.run('DELETE FROM EmployeeTime WHERE Sent = 1', [], false)
+    } else if (data.delJobIds.length > 0) {
+      await db.run(
+        `DELETE FROM ServiceRecord WHERE SerRecID IN (${data.delJobIds.map(() => '?').join(', ')})`,
+        data.delJobIds,
+        false,
+      )
+    }
 
-    if (data.jobs.length > 0) {
+    // The four core tables mirror the legacy MAUI local schema column for
+    // column (see schema.ts), and the SyncV2 DTO keys are those same column
+    // names after httpClient's first-letter lower-casing - so each row is
+    // written by walking the column list and reading `dto[camel(column)]`.
+    // Booleans are stored as 0/1 like sqlite-net did.
+    // On a partial sync a job the device has edited but not yet pushed
+    // (Sent = 0 - a status change from jobState.ts) keeps the local copy:
+    // the server's row is older by definition, and INSERT OR REPLACE would
+    // silently throw the pending change away.
+    const unsentJobs = new Set<number>()
+    if (!data.fullSync) {
+      for (const r of rowsOf<{ SerRecID: number }>(await db.query('SELECT SerRecID FROM ServiceRecord WHERE Sent = 0'))) {
+        unsentJobs.add(r.SerRecID)
+      }
+    }
+    const incomingJobs = data.serviceRecord.filter((job) => !unsentJobs.has(job.serRecID))
+
+    if (incomingJobs.length > 0) {
       await db.executeSet(
-        data.jobs.map((job) => {
+        incomingJobs.map((job) => {
           const preserved = existingStatus.get(job.serRecID)
           return {
-            statement: `INSERT INTO jobs (
-              serRecId, docketRef, siteId, callReceivedDt, probDesc, startDt, finishDt,
-              status, completed, serviceType, description, datePromisedDt, timeFrame,
-              scheduledDate, scheduledEndDate, callerName, jobNumber, priority,
-              dispatchEng, dispatchStatus, dispatchStatusDesc, system, timeEst,
-              local_status, local_completed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            statement: `${insert} INTO ServiceRecord (
+              ${SERVICE_RECORD_COLUMNS.join(', ')}, local_status, local_completed_at
+            ) VALUES (${placeholders(SERVICE_RECORD_COLUMNS.length + 2)})`,
             values: [
-              job.serRecID,
-              job.docketRef,
-              job.siteID,
-              job.callReceivedDT,
-              job.probDesc,
-              job.startDT,
-              job.finishDT,
-              job.status,
-              job.completed ? 1 : 0,
-              job.serviceType,
-              job.description,
-              job.datePromisedDT,
-              job.timeFrame,
-              job.scheduledDate,
-              job.scheduledEndDate,
-              job.callerName,
-              job.jobNumber,
-              job.priority,
-              job.dispatchEng,
-              job.dispatchStatus,
-              job.dispatchStatusDesc,
-              job.system,
-              job.timeEst,
+              ...columnValues(job, SERVICE_RECORD_COLUMNS),
               preserved?.status ?? 'open',
               preserved?.completedAt ?? null,
             ],
@@ -366,97 +467,97 @@ export async function upsertSyncData(data: SyncV2ResponseDto): Promise<void> {
       )
     }
 
-    if (data.sites.length > 0) {
+    if (data.alarmSite.length > 0) {
       await db.executeSet(
-        data.sites.map((site: SyncV2SiteDto) => ({
-          statement: `INSERT INTO sites (
-            siteId, siteRef, occupant, address, town, county, areaCode, postCode,
-            telephone, custId, panelLocation, note, latitude, longitude
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          values: [
-            site.siteID,
-            site.siteRef,
-            site.occupant,
-            site.address,
-            site.town,
-            site.county,
-            site.areaCode,
-            site.postCode,
-            site.telephone,
-            site.custID,
-            site.panelLocation,
-            site.note,
-            site.latitude,
-            site.longitude,
-          ],
+        data.alarmSite.map((site: SyncV2SiteDto) => ({
+          statement: `${insert} INTO AlarmSite (${ALARM_SITE_COLUMNS.join(', ')})
+            VALUES (${placeholders(ALARM_SITE_COLUMNS.length)})`,
+          values: columnValues(site, ALARM_SITE_COLUMNS),
         })),
         false,
       )
     }
 
-    if (data.customers.length > 0) {
+    if (data.customer.length > 0) {
       await db.executeSet(
-        data.customers.map((cust: SyncV2CustomerDto) => ({
-          statement: `INSERT INTO customers (
-            custId, organizationName, firstName, lastName, address, town, county,
-            homePhone, mobilePhone, workPhone, emailAddress, accountsRef
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          values: [
-            cust.custID,
-            cust.organizationName,
-            cust.firstName,
-            cust.lastName,
-            cust.address,
-            cust.town,
-            cust.county,
-            cust.homePhone,
-            cust.mobilePhone,
-            cust.workPhone,
-            cust.emailAddress,
-            cust.accountsRef,
-          ],
+        data.customer.map((cust: SyncV2CustomerDto) => ({
+          statement: `${insert} INTO Customer (${CUSTOMER_COLUMNS.join(', ')})
+            VALUES (${placeholders(CUSTOMER_COLUMNS.length)})`,
+          values: columnValues(cust, CUSTOMER_COLUMNS),
         })),
         false,
       )
     }
 
-    if (data.assets.length > 0) {
+    if (data.asset.length > 0) {
       await db.executeSet(
-        data.assets.map((asset: SyncV2AssetDto) => ({
-          statement: `INSERT INTO assets (
-            assetGuid, assetName, assetType, siteId, assetModel, assetDesc, serialNo,
-            number, location, lastServiceDate, nextServiceDate, isActive, templateId
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          values: [
-            asset.assetGuid,
-            asset.assetName,
-            asset.assetType,
-            asset.siteID,
-            asset.assetModel,
-            asset.assetDesc,
-            asset.serialNo,
-            asset.number,
-            asset.location,
-            asset.lastServiceDate,
-            asset.nextServiceDate,
-            asset.isActive ? 1 : 0,
-            asset.templateId,
-          ],
+        data.asset.map((asset: SyncV2AssetDto) => ({
+          statement: `${insert} INTO TblAsset (${TBL_ASSET_COLUMNS.join(', ')})
+            VALUES (${placeholders(TBL_ASSET_COLUMNS.length)})`,
+          values: columnValues(asset, TBL_ASSET_COLUMNS),
         })),
         false,
       )
+    }
+
+    const employees = data.employee ?? []
+    if (employees.length > 0) {
+      await db.executeSet(
+        employees.map((emp: SyncV2EmployeeDto) => ({
+          statement: `${insert} INTO Employee (${EMPLOYEE_COLUMNS.join(', ')})
+            VALUES (${placeholders(EMPLOYEE_COLUMNS.length)})`,
+          values: columnValues(emp, EMPLOYEE_COLUMNS),
+        })),
+        false,
+      )
+    }
+
+    // Server copies of this engineer's time rows. A row this device has
+    // written but not yet pushed (Sent = 0) wins over the server's copy -
+    // the device's version is newer by definition - so those GUIDs are
+    // skipped; everything else is upserted as already-sent (Sent = 1).
+    const employeeTimes = data.employeeTime ?? []
+    if (employeeTimes.length > 0) {
+      const unsentRes = await db.query('SELECT tblEmployeeTime_GUID FROM EmployeeTime WHERE Sent = 0')
+      const unsent = new Set(
+        rowsOf<{ tblEmployeeTime_GUID: string }>(unsentRes).map((r) => r.tblEmployeeTime_GUID.toUpperCase()),
+      )
+      const incoming = employeeTimes.filter((t) => !unsent.has(t.employeeTimeGuid.toUpperCase()))
+      if (incoming.length > 0) {
+        await db.executeSet(
+          incoming.map((t: SyncV2EmployeeTimeDto) => ({
+            statement: `INSERT OR REPLACE INTO EmployeeTime (
+              tblEmployeeTime_GUID, ServiceID, EmployeeID, StartDT, FinishDT, RateHour, TimeHours, Activity, Updated, Deleted, Sent
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)`,
+            values: [
+              t.employeeTimeGuid.toUpperCase(),
+              t.serviceID,
+              t.employeeID,
+              t.startDT,
+              t.finishDT,
+              t.rateHour,
+              t.timeHours,
+              t.activity,
+              t.updated,
+            ],
+          })),
+          false,
+        )
+      }
     }
 
     // common_categories / common_category_props are pure reference/config
     // data - never edited on the device, so a full replace is safe (same as
     // sites/customers/assets above).
-    await db.run('DELETE FROM common_categories', [], false)
-    await db.run('DELETE FROM common_category_props', [], false)
+    if (data.fullSync) {
+      await db.run('DELETE FROM common_categories', [], false)
+      await db.run('DELETE FROM common_category_props', [], false)
+    }
 
     if (data.commonCategories.length > 0) {
       await db.executeSet(
         data.commonCategories.map((cat: SyncV2CommonCategoryDto) => ({
-          statement: `INSERT INTO common_categories (
+          statement: `${insert} INTO common_categories (
             categoryId, type, name, propCount, templateId, templateType
           ) VALUES (?, ?, ?, ?, ?, ?)`,
           values: [cat.categoryId, cat.type, cat.name, cat.propCount, cat.templateId, cat.templateType],
@@ -468,7 +569,7 @@ export async function upsertSyncData(data: SyncV2ResponseDto): Promise<void> {
     if (data.commonCategoryProps.length > 0) {
       await db.executeSet(
         data.commonCategoryProps.map((prop: SyncV2CommonCategoryPropDto) => ({
-          statement: `INSERT INTO common_category_props (
+          statement: `${insert} INTO common_category_props (
             propsId, categoryId, categoryType, name, ctrlType, ctrlWidth, ctrlOrder,
             ctrlIsMandatory, ctrlDefaultVal, ctrlProps, propColRefNo, code
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -540,6 +641,15 @@ export async function upsertSyncData(data: SyncV2ResponseDto): Promise<void> {
       [new Date().toISOString()],
       false,
     )
+    // The SERVER's clock, not ours - the API compares its Updated columns
+    // against exactly this value on the next partial sync, so it must go
+    // back verbatim (including the daylight-saving shift the API applies).
+    await db.run(
+      `INSERT INTO app_meta (key, value) VALUES ('serverSyncDateTime', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      [data.syncDateTime],
+      false,
+    )
 
     await db.commitTransaction()
   } catch (err) {
@@ -564,19 +674,80 @@ export async function getLastSyncAt(): Promise<string | null> {
   return rows[0]?.value ?? null
 }
 
+/** The syncDateTime the server returned on the last successful SyncDown, or null if never synced. */
+export async function getServerSyncDateTime(): Promise<string | null> {
+  const db = await getDb()
+  const res = await db.query("SELECT value FROM app_meta WHERE key = 'serverSyncDateTime'")
+  const rows = rowsOf<{ value: string }>(res)
+  return rows[0]?.value ?? null
+}
+
+export type SyncDownMode = 'full' | 'partial'
+
+/**
+ * Builds the SyncDown request from local state. A 'partial' request with no
+ * stored serverSyncDateTime (never synced, or upgraded from a build that
+ * didn't store it) is promoted to a full sync - there is nothing to diff
+ * against, and the API would treat it as full anyway.
+ */
+export async function buildSyncDownRequest(mode: SyncDownMode): Promise<SyncDownRequestDto> {
+  const lastSyncTime = mode === 'partial' ? await getServerSyncDateTime() : null
+  if (mode === 'full' || !lastSyncTime) {
+    return { fullSync: true }
+  }
+
+  const db = await getDb()
+  const jobs = rowsOf<{ serRecId: number }>(await db.query('SELECT SerRecID AS serRecId FROM ServiceRecord'))
+  const sites = rowsOf<{ siteId: number }>(await db.query('SELECT SiteID AS siteId FROM AlarmSite'))
+
+  return {
+    fullSync: false,
+    lastSyncTime,
+    verifiedJobIds: jobs.map((r) => r.serRecId),
+    verifiedSiteIds: sites.map((r) => r.siteId),
+  }
+}
+
+export type SyncDownResult = { ok: true; fullSync: boolean } | { ok: false; message: string }
+
+/**
+ * The one entry point for pulling data down: builds the request for the
+ * requested mode, calls the API and applies the bundle via upsertSyncData.
+ * Network / API errors are returned, not thrown, so each screen only has to
+ * decide what to show. Used by LoginPage (first sign-in -> 'full'),
+ * UtilitiesPage (manual sync -> 'partial', "replace local data" -> 'full')
+ * and JobListPage's pull-to-refresh ('partial').
+ */
+export async function syncDownAndStore(mode: SyncDownMode): Promise<SyncDownResult> {
+  try {
+    const request = await buildSyncDownRequest(mode)
+    const result = await syncDown(request)
+    if (!result.hasData || !result.data) {
+      return { ok: false, message: result.failMessage ?? 'Sync failed.' }
+    }
+    await upsertSyncData(result.data)
+    return { ok: true, fullSync: result.data.fullSync }
+  } catch (err) {
+    return {
+      ok: false,
+      message: err instanceof Error ? err.message : 'Could not reach the server.',
+    }
+  }
+}
+
 /** Open (not-yet-completed-locally) jobs, most urgent first. */
 export async function getOpenJobs(): Promise<LocalJob[]> {
   const db = await getDb()
   const res = await db.query(
-    `SELECT * FROM jobs WHERE local_status != 'completed'
-     ORDER BY priority DESC, scheduledDate ASC`,
+    `SELECT * FROM ServiceRecord WHERE local_status NOT IN ('completed', 'declined')
+     ORDER BY Priority DESC, ScheduledDate ASC`,
   )
   return rowsOf<Record<string, unknown>>(res).map(mapJobRow)
 }
 
 export async function getJobById(serRecId: number): Promise<LocalJob | null> {
   const db = await getDb()
-  const res = await db.query('SELECT * FROM jobs WHERE serRecId = ?', [serRecId])
+  const res = await db.query('SELECT * FROM ServiceRecord WHERE SerRecID = ?', [serRecId])
   const rows = rowsOf<Record<string, unknown>>(res)
   return rows[0] ? mapJobRow(rows[0]) : null
 }
@@ -584,63 +755,34 @@ export async function getJobById(serRecId: number): Promise<LocalJob | null> {
 /** The one job (if any) currently in progress - only one is allowed at a time. */
 export async function getWipJob(): Promise<LocalJob | null> {
   const db = await getDb()
-  const res = await db.query("SELECT * FROM jobs WHERE local_status = 'wip' LIMIT 1")
+  const res = await db.query("SELECT * FROM ServiceRecord WHERE local_status = 'wip' LIMIT 1")
   const rows = rowsOf<Record<string, unknown>>(res)
   return rows[0] ? mapJobRow(rows[0]) : null
 }
 
-export async function startJob(serRecId: number): Promise<void> {
-  const db = await getDb()
-  await db.run("UPDATE jobs SET local_status = 'wip' WHERE serRecId = ?", [serRecId])
-  await persist()
-}
-
-/**
- * Marks a job paused locally - it stays out of 'completed' (so getOpenJobs
- * keeps showing it) but is no longer 'wip' (so getWipJob's "only one job in
- * progress at a time" lock frees up, letting another job be started).
- * Resuming a paused job reuses the existing startJob() above - same as this
- * app has never had a separate "resume" server call, only Complete/Pause
- * explicitly mutate the server's DispatchStatus.
- */
-export async function pauseJobLocally(serRecId: number): Promise<void> {
-  const db = await getDb()
-  await db.run("UPDATE jobs SET local_status = 'paused' WHERE serRecId = ?", [serRecId])
-  await persist()
-}
-
-export async function markJobCompletedLocally(serRecId: number): Promise<void> {
-  const db = await getDb()
-  await db.run(
-    "UPDATE jobs SET local_status = 'completed', local_completed_at = ? WHERE serRecId = ?",
-    [new Date().toISOString(), serRecId],
-  )
-  await persist()
-}
-
 export async function getSiteById(siteId: number): Promise<LocalSite | null> {
   const db = await getDb()
-  const res = await db.query('SELECT * FROM sites WHERE siteId = ?', [siteId])
-  const rows = rowsOf<LocalSite>(res)
-  return rows[0] ?? null
+  const res = await db.query('SELECT * FROM AlarmSite WHERE SiteID = ?', [siteId])
+  const rows = rowsOf<Record<string, unknown>>(res)
+  return rows[0] ? mapSiteRow(rows[0]) : null
 }
 
 export async function getCustomerById(custId: number): Promise<LocalCustomer | null> {
   const db = await getDb()
-  const res = await db.query('SELECT * FROM customers WHERE custId = ?', [custId])
-  const rows = rowsOf<LocalCustomer>(res)
-  return rows[0] ?? null
+  const res = await db.query('SELECT * FROM Customer WHERE CustID = ?', [custId])
+  const rows = rowsOf<Record<string, unknown>>(res)
+  return rows[0] ? mapCustomerRow(rows[0]) : null
 }
 
 export async function getAssetsBySite(siteId: number): Promise<LocalAsset[]> {
   const db = await getDb()
-  const res = await db.query('SELECT * FROM assets WHERE siteId = ? ORDER BY assetName', [siteId])
+  const res = await db.query('SELECT * FROM TblAsset WHERE SiteID = ? ORDER BY AssetName', [siteId])
   return rowsOf<Record<string, unknown>>(res).map(mapAssetRow)
 }
 
 export async function getAssetByGuid(assetGuid: string): Promise<LocalAsset | null> {
   const db = await getDb()
-  const res = await db.query('SELECT * FROM assets WHERE assetGuid = ?', [assetGuid])
+  const res = await db.query('SELECT * FROM TblAsset WHERE AssetGUID = ?', [assetGuid])
   const rows = rowsOf<Record<string, unknown>>(res)
   return rows[0] ? mapAssetRow(rows[0]) : null
 }
@@ -707,6 +849,7 @@ export async function saveAssetProperties(
     return
   }
 
+  await clearStaleTransaction(db)
   await db.beginTransaction()
   try {
     await db.executeSet(
@@ -858,6 +1001,7 @@ export async function saveAssetServiceVisit(
 
   const rows = header ? [header, ...details] : details
 
+  await clearStaleTransaction(db)
   await db.beginTransaction()
   try {
     // serviceDate is best-effort "when this visit was captured" - stamped
@@ -1077,6 +1221,7 @@ export async function applyAssetServiceUpResults(
   if (succeeded.length === 0) return
 
   const db = await getDb()
+  await clearStaleTransaction(db)
   await db.beginTransaction()
   try {
     for (const visit of succeeded) {
@@ -1107,88 +1252,442 @@ export async function applyAssetServiceUpResults(
 }
 
 /**
- * Result of pushPendingAssetServiceVisits - a plain success/failure shape so
- * callers (UtilitiesPage.handleSync, WipPage.handleCompleteJob) can each
- * show their own error text without duplicating the push logic itself.
+ * Result of pushPendingLocalChanges - a plain success/failure shape so
+ * callers (UtilitiesPage.handleSync, WipPage, JobDetailPage) can each show
+ * their own error text without duplicating the push logic itself.
  */
-export type PushPendingAssetServiceResult =
-  | { ok: true }
-  | { ok: false; message: string }
-
-/**
- * Pushes every locally-saved, not-yet-synced Asset Service visit up through
- * the single common SyncUp endpoint, and applies the result back to local
- * storage (see applyAssetServiceUpResults) - shared by UtilitiesPage's
- * manual Sync (push-then-pull) and WipPage's Complete Job (push only, so the
- * job is marked complete with this visit's data already on the server -
- * see WipPage.handleCompleteJob). A no-op (returns { ok: true } immediately)
- * when there is nothing pending.
- *
- * Local data is left untouched on any failure - the caller decides what
- * that means for its own flow (UtilitiesPage just reports it and lets the
- * next Sync retry; WipPage must NOT mark the job complete, since the
- * server's completion PDF/email is built from whatever Asset Service data
- * it already has for this job at the moment CompleteJob is called).
- */
-export async function pushPendingAssetServiceVisits(): Promise<PushPendingAssetServiceResult> {
-  const pendingVisits = await getPendingAssetServiceVisits()
-  if (pendingVisits.length === 0) {
-    return { ok: true }
-  }
-
-  const pushResult = await syncUp({
-    assetService: {
-      visits: pendingVisits.map(({ history, properties }) => ({
-        serviceHisId: history.serviceHisId,
-        assetGuid: history.assetGuid,
-        serRecId: history.serRecId,
-        serviceDate: history.serviceDate,
-        status: history.status,
-        // Drop serviceHisId from each property row - it's implied by the
-        // visit above and isn't part of the property DTO shape.
-        properties: properties.map(({ serviceHisId: _serviceHisId, ...rest }) => rest),
-      })),
-    },
-  })
-
-  if (!pushResult.hasData || !pushResult.data?.assetService) {
-    return {
-      ok: false,
-      message:
-        pushResult.failMessage ??
-        'Could not sync your saved service visits. Your local changes are safe and will be retried on the next Sync.',
-    }
-  }
-
-  const assetServiceResult = pushResult.data.assetService
-  await applyAssetServiceUpResults(assetServiceResult.visits)
-
-  const failedVisits = assetServiceResult.visits.filter((v) => !v.success)
-  if (failedVisits.length > 0) {
-    return {
-      ok: false,
-      message: `${failedVisits.length} saved service visit(s) could not be synced: ${failedVisits
-        .map((v) => v.failMessage ?? 'Unknown error')
-        .join('; ')}. They will be retried on the next Sync.`,
-    }
-  }
-
-  return { ok: true }
+export interface PushedCounts {
+  visits: number
+  jobs: number
+  times: number
+  locations: number
+  completions: number
 }
 
+export type PushPendingResult = { ok: true; pushed: PushedCounts } | { ok: false; message: string; pushed: PushedCounts }
+
+/** "Sent 2 job updates and 5 time records" - or null when nothing went up. */
+export function describePushed(p: PushedCounts): string | null {
+  const parts: string[] = []
+  if (p.jobs) parts.push(`${p.jobs} job update${p.jobs === 1 ? '' : 's'}`)
+  if (p.times) parts.push(`${p.times} time record${p.times === 1 ? '' : 's'}`)
+  if (p.visits) parts.push(`${p.visits} service visit${p.visits === 1 ? '' : 's'}`)
+  if (p.locations) parts.push(`${p.locations} location update${p.locations === 1 ? '' : 's'}`)
+  if (p.completions) parts.push(`${p.completions} completion${p.completions === 1 ? '' : 's'}`)
+  if (parts.length === 0) return null
+  return `Sent ${parts.length > 1 ? parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1] : parts[0]}`
+}
+
+/** @deprecated name kept for older call sites - see PushPendingResult. */
+export type PushPendingAssetServiceResult = PushPendingResult
+
+const PENDING_COMPLETIONS_KEY = 'pendingCompleteJobIds'
+
+/**
+ * Jobs completed on the device whose server-side CompleteJob call (asset
+ * history status + completion PDF/email - see SyncV2Service.CompleteJob)
+ * has not succeeded yet. The job's DispatchStatus 50 itself travels up
+ * through SyncUp like any other status; this list only exists so the
+ * completion email is never lost when the engineer was offline at the
+ * moment they pressed Complete. Retried by pushPendingLocalChanges.
+ */
+export async function getPendingCompletions(): Promise<number[]> {
+  const db = await getDb()
+  const res = await db.query('SELECT value FROM app_meta WHERE key = ?', [PENDING_COMPLETIONS_KEY])
+  const raw = rowsOf<{ value: string | null }>(res)[0]?.value
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    return Array.isArray(parsed) ? parsed.filter((n): n is number => typeof n === 'number') : []
+  } catch {
+    return []
+  }
+}
+
+async function setPendingCompletions(ids: number[]): Promise<void> {
+  const db = await getDb()
+  await db.run(
+    `INSERT INTO app_meta (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    [PENDING_COMPLETIONS_KEY, JSON.stringify(ids)],
+  )
+}
+
+export async function addPendingCompletion(serRecId: number): Promise<void> {
+  const ids = await getPendingCompletions()
+  if (!ids.includes(serRecId)) {
+    ids.push(serRecId)
+    await setPendingCompletions(ids)
+    await persist()
+  }
+}
+
+async function removePendingCompletion(serRecId: number): Promise<void> {
+  const ids = await getPendingCompletions()
+  await setPendingCompletions(ids.filter((id) => id !== serRecId))
+}
+
+/** ServiceRecord rows edited on the device (Sent = 0), shaped as the API's JobUpRequest. */
+async function getPendingJobRows(): Promise<JobUpDto[]> {
+  const db = await getDb()
+  const res = await db.query(
+    `SELECT SerRecID, CallType, ProbDesc, StartDT, FinishDT, Report, ScheduledDate, ScheduledEndDate,
+            PrevMaintCarriedOut, System, DispatchEng, Installation, Maintenancectrl, EmergencyService,
+            TemporaryDC, DispatchStatus, Cause, SerRec_GUID
+     FROM ServiceRecord WHERE Sent = 0`,
+  )
+  const bool = (v: unknown): boolean | null => (v == null ? null : Boolean(v))
+  return rowsOf<Record<string, unknown>>(res).map((r) => ({
+    serRecID: r.SerRecID as number,
+    callType: (r.CallType as number | null) ?? null,
+    probDesc: (r.ProbDesc as string | null) ?? null,
+    startDT: (r.StartDT as string | null) ?? null,
+    finishDT: (r.FinishDT as string | null) ?? null,
+    report: (r.Report as string | null) ?? null,
+    scheduledDate: (r.ScheduledDate as string | null) ?? null,
+    scheduledEndDate: (r.ScheduledEndDate as string | null) ?? null,
+    prevMaintCarriedOut: Boolean(r.PrevMaintCarriedOut),
+    system: (r.System as string | null) ?? null,
+    dispatchEng: (r.DispatchEng as string | null) ?? null,
+    installation: bool(r.Installation),
+    maintenancectrl: bool(r.Maintenancectrl),
+    emergencyService: bool(r.EmergencyService),
+    temporaryDC: bool(r.TemporaryDC),
+    dispatchStatus: (r.DispatchStatus as string | null) ?? null,
+    cause: (r.Cause as string | null) ?? null,
+    serRec_GUID: (r.SerRec_GUID as string | null) ?? null,
+  }))
+}
+
+/**
+ * EmployeeTime rows not yet on the server - including rows still open
+ * (FinishDT NULL: the team is on the job right now), exactly like the
+ * legacy app's "WHERE Sent=0": the office then sees who is clocked on, and
+ * the row goes up again (Sent is reset to 0) when the next state change
+ * closes it, upserting the FinishDT/TimeHours over the open copy.
+ */
+async function getPendingTimeRows(): Promise<EmployeeTimeUpDto[]> {
+  const db = await getDb()
+  const res = await db.query(
+    `SELECT tblEmployeeTime_GUID, ServiceID, EmployeeID, StartDT, FinishDT, TimeHours, Activity
+     FROM EmployeeTime WHERE Sent = 0 AND Deleted = 0`,
+  )
+  return rowsOf<{
+    tblEmployeeTime_GUID: string
+    ServiceID: number
+    EmployeeID: string
+    StartDT: string
+    FinishDT: string | null
+    TimeHours: number | null
+    Activity: string | null
+  }>(res).map((r) => ({
+    tblEmployeeTime_GUID: r.tblEmployeeTime_GUID,
+    serviceID: r.ServiceID,
+    employeeID: r.EmployeeID,
+    startDT: r.StartDT,
+    finishDT: r.FinishDT,
+    timeHours: r.TimeHours,
+    activity: r.Activity,
+  }))
+}
+
+/**
+ * Marks confirmed rows as sent. GUID keys are compared case-insensitively:
+ * the device writes them upper-case (like the legacy app) while .NET
+ * serialises System.Guid lower-case.
+ */
+/** TblLiveSync rows not yet on the server, shaped as the API's LiveSyncUpRequest. */
+async function getPendingLiveSyncRows(): Promise<LiveSyncUpDto[]> {
+  const db = await getDb()
+  const res = await db.query(
+    `SELECT ID, EmpID, Latitude, Longitude, Activity, SerRecID, Updated, StateChange, ETA, New_GPS, Team
+     FROM TblLiveSync WHERE Sent = 0 ORDER BY Updated`,
+  )
+  return rowsOf<Record<string, unknown>>(res).map((r) => ({
+    id: r.ID as string,
+    empID: r.EmpID as string,
+    latitude: (r.Latitude as string | null) ?? null,
+    longitude: (r.Longitude as string | null) ?? null,
+    activity: (r.Activity as string | null) ?? null,
+    serRecID: (r.SerRecID as number | null) ?? null,
+    updated: (r.Updated as string | null) ?? null,
+    stateChange: Boolean(r.StateChange),
+    eta: (r.ETA as string | null) ?? null,
+    newGPS: Boolean(r.New_GPS),
+    team: (r.Team as string | null) ?? null,
+  }))
+}
+
+async function markSent(
+  table: 'ServiceRecord' | 'EmployeeTime' | 'TblLiveSync',
+  keyColumn: string,
+  keys: unknown[],
+): Promise<void> {
+  if (keys.length === 0) return
+  const db = await getDb()
+  const isText = table !== 'ServiceRecord'
+  await db.run(
+    `UPDATE ${table} SET Sent = 1 WHERE ${isText ? `upper(${keyColumn})` : keyColumn} IN (${placeholders(keys.length)})`,
+    isText ? keys.map((k) => String(k).toUpperCase()) : keys,
+  )
+}
+
+/**
+ * Pushes EVERYTHING the device has saved and not yet sent up through the
+ * single common SyncUp endpoint in one request - Asset Service visits, job
+ * status/time edits (ServiceRecord rows with Sent = 0, written by
+ * db/jobState.ts) and closed employee time rows (EmployeeTime with Sent = 0)
+ * - then applies the result back: confirmed keys are marked Sent = 1 /
+ * synced, failed ones are left pending so the next push retries them.
+ * Finally, any job completed on the device while offline gets its
+ * server-side CompleteJob call retried (see getPendingCompletions).
+ *
+ * Shared by UtilitiesPage's manual Sync (push-then-pull), WipPage's
+ * Complete Job and the best-effort push after every job state change. A
+ * no-op (returns { ok: true } immediately) when there is nothing pending.
+ * Local data is left untouched on any failure - the caller decides what to
+ * show; nothing is ever lost because every row keeps its Sent = 0 flag
+ * until the server confirms it.
+ */
+export async function pushPendingLocalChanges(): Promise<PushPendingResult> {
+  const [pendingVisits, pendingJobs, pendingTimes, pendingLocations, pendingCompletions] = await Promise.all([
+    getPendingAssetServiceVisits(),
+    getPendingJobRows(),
+    getPendingTimeRows(),
+    getPendingLiveSyncRows(),
+    getPendingCompletions(),
+  ])
+
+  const problems: string[] = []
+  const pushed: PushedCounts = { visits: 0, jobs: 0, times: 0, locations: 0, completions: 0 }
+
+  if (pendingVisits.length > 0 || pendingJobs.length > 0 || pendingTimes.length > 0 || pendingLocations.length > 0) {
+    const pushResult = await syncUp({
+      deviceDateTime: new Date().toISOString(),
+      assetService:
+        pendingVisits.length > 0
+          ? {
+              visits: pendingVisits.map(({ history, properties }) => ({
+                serviceHisId: history.serviceHisId,
+                assetGuid: history.assetGuid,
+                serRecId: history.serRecId,
+                serviceDate: history.serviceDate,
+                status: history.status,
+                // Drop serviceHisId from each property row - it's implied by the
+                // visit above and isn't part of the property DTO shape.
+                properties: properties.map(({ serviceHisId: _serviceHisId, ...rest }) => rest),
+              })),
+            }
+          : undefined,
+      serviceRecord: pendingJobs.length > 0 ? pendingJobs : undefined,
+      employeeTime: pendingTimes.length > 0 ? pendingTimes : undefined,
+      liveSync: pendingLocations.length > 0 ? pendingLocations : undefined,
+    })
+
+    if (!pushResult.hasData || !pushResult.data) {
+      return {
+        ok: false,
+        pushed,
+        message:
+          pushResult.failMessage ??
+          'Could not sync your saved work. Your local changes are safe and will be retried on the next Sync.',
+      }
+    }
+
+    const data = pushResult.data
+
+    if (pendingVisits.length > 0) {
+      if (data.assetService) {
+        await applyAssetServiceUpResults(data.assetService.visits)
+        pushed.visits = data.assetService.visits.filter((v) => v.success).length
+        const failedVisits = data.assetService.visits.filter((v) => !v.success)
+        if (failedVisits.length > 0) {
+          problems.push(
+            `${failedVisits.length} saved service visit(s) could not be synced: ${failedVisits
+              .map((v) => v.failMessage ?? 'Unknown error')
+              .join('; ')}`,
+          )
+        }
+      } else {
+        problems.push('The server did not acknowledge the saved service visits')
+      }
+    }
+
+    if (pendingJobs.length > 0) {
+      const confirmed = data.serviceRecord?.confirmed ?? []
+      await markSent('ServiceRecord', 'SerRecID', confirmed)
+      pushed.jobs = confirmed.length
+      const failed = data.serviceRecord?.failed ?? []
+      if (failed.length > 0) {
+        problems.push(
+          `${failed.length} job update(s) could not be synced: ${failed
+            .map((f) => `#${f.key}: ${f.failMessage ?? 'Unknown error'}`)
+            .join('; ')}`,
+        )
+      }
+    }
+
+    if (pendingTimes.length > 0) {
+      const confirmed = data.employeeTime?.confirmed ?? []
+      await markSent('EmployeeTime', 'tblEmployeeTime_GUID', confirmed)
+      pushed.times = confirmed.length
+      const failed = data.employeeTime?.failed ?? []
+      if (failed.length > 0) {
+        problems.push(`${failed.length} time record(s) could not be synced`)
+      }
+    }
+
+    if (pendingLocations.length > 0) {
+      // The server only keeps the 5 most recent breadcrumbs and acknowledges
+      // the rest as confirmed, so everything confirmed is simply done.
+      const confirmed = data.liveSync?.confirmed ?? []
+      await markSent('TblLiveSync', 'ID', confirmed)
+      pushed.locations = confirmed.length
+      // Sent breadcrumbs are of no further use on the device - keep the table small.
+      await db_deleteSentLiveSync()
+    }
+
+    await persist()
+  }
+
+  for (const serRecId of pendingCompletions) {
+    try {
+      const result = await completeJobOnServer(serRecId)
+      if (result.hasData) {
+        await removePendingCompletion(serRecId)
+        pushed.completions += 1
+      } else {
+        problems.push(`Job #${serRecId} completion: ${result.failMessage ?? 'not accepted by the server'}`)
+      }
+    } catch (err) {
+      problems.push(`Job #${serRecId} completion: ${err instanceof Error ? err.message : 'could not reach the server'}`)
+    }
+  }
+  if (pendingCompletions.length > 0) {
+    await persist()
+  }
+
+  if (problems.length > 0) {
+    return { ok: false, pushed, message: `${problems.join('. ')}. They will be retried on the next Sync.` }
+  }
+  return { ok: true, pushed }
+}
+
+async function db_deleteSentLiveSync(): Promise<void> {
+  const db = await getDb()
+  await db.run("DELETE FROM TblLiveSync WHERE Sent = 1 AND replace(Updated, 'T', ' ') < datetime('now', 'localtime', '-1 day')")
+}
+
+/**
+ * Fire-and-forget variant used right after a job state change (Travel To,
+ * Start, Pause, ...): tries to push, swallows every error - the engineer
+ * may well be offline in a plant room - and leaves the rows pending for the
+ * next explicit Sync.
+ */
+export async function tryPushPendingLocalChanges(): Promise<void> {
+  try {
+    await pushPendingLocalChanges()
+  } catch {
+    // offline - rows stay Sent = 0 and go up on the next Sync
+  }
+}
+
+/** @deprecated use pushPendingLocalChanges - kept so older call sites still compile. */
+export const pushPendingAssetServiceVisits = pushPendingLocalChanges
+
+// The core tables use the legacy PascalCase column names (see schema.ts),
+// while the rest of the app works with the camelCase Local* types below -
+// these mappers are the one place that translation happens. Column names
+// are quoted exactly as SQLite returns them.
+
 function mapJobRow(row: Record<string, unknown>): LocalJob {
+  const s = (k: string) => (row[k] as string | null) ?? null
+  const n = (k: string) => (row[k] as number | null) ?? null
   return {
-    ...(row as unknown as LocalJob),
-    completed: Boolean(row.completed),
+    serRecId: row.SerRecID as number,
+    docketRef: s('DocketRef'),
+    siteId: n('SiteID'),
+    callReceivedDt: s('CallReceivedDT'),
+    probDesc: s('ProbDesc'),
+    startDt: s('StartDT'),
+    finishDt: s('FinishDT'),
+    status: s('Status'),
+    completed: Boolean(row.Completed),
+    serviceType: s('ServiceType'),
+    description: s('Description'),
+    datePromisedDt: s('DatePromisedDT'),
+    timeFrame: s('Time_Frame'),
+    scheduledDate: s('ScheduledDate'),
+    scheduledEndDate: s('ScheduledEndDate'),
+    callerName: s('CallerName'),
+    jobNumber: n('JobNumber'),
+    priority: n('Priority'),
+    dispatchEng: s('DispatchEng'),
+    dispatchStatus: s('DispatchStatus'),
+    dispatchStatusDesc: s('DispatchStatusDesc'),
+    system: s('System'),
+    timeEst: (row.TimeEst as number | null) ?? 0,
     localStatus: row.local_status as LocalJobStatus,
-    localCompletedAt: (row.local_completed_at as string | null) ?? null,
+    localCompletedAt: s('local_completed_at'),
+  }
+}
+
+function mapSiteRow(row: Record<string, unknown>): LocalSite {
+  const s = (k: string) => (row[k] as string | null) ?? null
+  const n = (k: string) => (row[k] as number | null) ?? null
+  return {
+    siteId: row.SiteID as number,
+    siteRef: s('SiteRef'),
+    occupant: s('Occupant'),
+    address: s('Address'),
+    town: s('Town'),
+    county: s('County'),
+    areaCode: s('AreaCode'),
+    postCode: s('PostCode'),
+    telephone: s('Telephone'),
+    custId: n('CustID'),
+    panelLocation: s('PanelLocation'),
+    note: s('Note'),
+    latitude: n('Latitude'),
+    longitude: n('Longitude'),
+  }
+}
+
+function mapCustomerRow(row: Record<string, unknown>): LocalCustomer {
+  const s = (k: string) => (row[k] as string | null) ?? null
+  return {
+    custId: row.CustID as number,
+    organizationName: s('OrganizationName'),
+    firstName: s('FirstName'),
+    lastName: s('LastName'),
+    address: s('Address'),
+    town: s('Town'),
+    county: s('County'),
+    homePhone: s('HomePhone'),
+    mobilePhone: s('MobilePhone'),
+    workPhone: s('WorkPhone'),
+    emailAddress: s('EmailAddress'),
+    accountsRef: s('AccountsRef'),
   }
 }
 
 function mapAssetRow(row: Record<string, unknown>): LocalAsset {
+  const s = (k: string) => (row[k] as string | null) ?? null
+  const n = (k: string) => (row[k] as number | null) ?? null
   return {
-    ...(row as unknown as LocalAsset),
-    isActive: Boolean(row.isActive),
+    assetGuid: row.AssetGUID as string,
+    assetName: s('AssetName'),
+    assetType: n('AssetType'),
+    siteId: n('SiteID'),
+    assetModel: s('AssetModel'),
+    assetDesc: s('AssetDesc'),
+    serialNo: s('SerialNo'),
+    number: s('Number'),
+    location: s('Location'),
+    lastServiceDate: s('LastServiceDate'),
+    nextServiceDate: s('NextServiceDate'),
+    isActive: Boolean(row.IsActive),
+    templateId: n('TemplateID'),
   }
 }
 

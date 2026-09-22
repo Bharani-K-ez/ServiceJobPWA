@@ -1,66 +1,99 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { App } from '@capacitor/app'
 import {
-  IonBadge,
   IonButton,
   IonButtons,
+  IonChip,
   IonContent,
+  IonDatetime,
   IonHeader,
   IonIcon,
-  IonItem,
   IonLabel,
   IonList,
-  IonNote,
+  IonModal,
   IonPage,
   IonRefresher,
   IonRefresherContent,
+  IonSearchbar,
   IonText,
   IonTitle,
+  IonToast,
   IonToolbar,
   type RefresherEventDetail,
 } from '@ionic/react'
-import { settingsOutline } from 'ionicons/icons'
-import {
-  getOpenJobs,
-  getSiteById,
-  getWipJob,
-  pauseJobLocally,
-  startJob,
-  type LocalJob,
-} from '../db/localData'
-import { pauseJobOnServer, syncDown } from '../api/syncV2'
-import { upsertSyncData } from '../db/localData'
+import { calendarOutline, closeCircle, listOutline, settingsOutline } from 'ionicons/icons'
+import { getCustomerById, getOpenJobs, getSiteById, syncDownAndStore } from '../db/localData'
+import { getEngineerState, type JobState } from '../db/jobState'
+import { formatDate } from '../utils/format'
+import JobRowItem from './jobs/JobRowItem'
+import JobCalendarView from './jobs/JobCalendarView'
+import { applyFilters, buildJobRow, type DateFilter, type DatePreset, type JobRow } from './jobs/jobFilters'
 
-interface JobRow {
-  job: LocalJob
-  siteLabel: string
+type ViewMode = 'list' | 'calendar'
+
+const DATE_PRESETS: { value: DatePreset; label: string }[] = [
+  { value: 'all', label: 'All' },
+  { value: 'today', label: 'Today' },
+  { value: 'week', label: 'This week' },
+  { value: 'overdue', label: 'Overdue' },
+  { value: 'unscheduled', label: 'Unscheduled' },
+]
+
+function readViewMode(): ViewMode {
+  try {
+    return localStorage.getItem('jobs.viewMode') === 'calendar' ? 'calendar' : 'list'
+  } catch {
+    return 'list'
+  }
 }
 
+/**
+ * My Jobs. Two views over the same filtered set of jobs - the default list
+ * and a Day/Week/Month calendar (JobCalendarView) - with a wild search
+ * (job number, docket, site, customer, address, description...) and a
+ * date filter (presets or a picked range) that apply to both. The chosen
+ * view is remembered on the device.
+ */
 export default function JobListPage() {
   const navigate = useNavigate()
   const location = useLocation()
   const [rows, setRows] = useState<JobRow[]>([])
-  const [wipSerRecId, setWipSerRecId] = useState<number | null>(null)
+  const [view, setView] = useState<ViewMode>(readViewMode)
+  const [query, setQuery] = useState('')
+  const [dateFilter, setDateFilter] = useState<DateFilter>({ preset: 'all' })
+  const [rangeOpen, setRangeOpen] = useState(false)
+  const [currentJob, setCurrentJob] = useState<number | null>(null)
+  const [currentState, setCurrentState] = useState<JobState>('Unknown')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [pausingSerRecId, setPausingSerRecId] = useState<number | null>(null)
+  // One-shot message handed over by WipPage after completing a job (see its
+  // navigate('/jobs', { state: { toast } })).
+  const [toast, setToast] = useState<string | null>(null)
+
+  useEffect(() => {
+    const incoming = (location.state as { toast?: string } | null)?.toast
+    if (incoming) {
+      setToast(incoming)
+      // Clear it so a refresh / back-navigation doesn't replay it.
+      navigate(location.pathname, { replace: true, state: null })
+    }
+  }, [location, navigate])
 
   const load = useCallback(async () => {
     setError(null)
     try {
-      const [jobs, wipJob] = await Promise.all([getOpenJobs(), getWipJob()])
-      const withSites = await Promise.all(
+      const [jobs, engineer] = await Promise.all([getOpenJobs(), getEngineerState()])
+      const built = await Promise.all(
         jobs.map(async (job) => {
           const site = job.siteId != null ? await getSiteById(job.siteId) : null
-          const siteLabel = site
-            ? [site.occupant, site.address, site.town].filter(Boolean).join(', ')
-            : 'No site on file'
-          return { job, siteLabel }
+          const customer = site?.custId != null ? await getCustomerById(site.custId) : null
+          return buildJobRow(job, site, customer)
         }),
       )
-      setRows(withSites)
-      setWipSerRecId(wipJob?.serRecId ?? null)
+      setRows(built)
+      setCurrentJob(engineer.currentJob)
+      setCurrentState(engineer.currentState)
     } catch (err) {
       // Without this, a failure here (e.g. the local database failing to
       // open - see sqlite.ts's getDb()/ensureWebStore() for a case that
@@ -104,11 +137,16 @@ export default function JobListPage() {
   // subscribed to that location regardless of which route is currently
   // visible - so this fires exactly when the app actually arrives at
   // "/jobs", however it got there.
+  // Both "/" and "/jobs" render this page (see App.tsx's note on why "/"
+  // is not a redirect) - a fresh browser load lands on "/", so the check
+  // must accept it too or the list stays empty until the next navigation.
+  const isJobsRoute = location.pathname === '/jobs' || location.pathname === '/'
+
   useEffect(() => {
-    if (location.pathname === '/jobs') {
+    if (isJobsRoute) {
       void load()
     }
-  }, [location, load])
+  }, [location, isJobsRoute, load])
 
   // Covers a case the location-based effect above can't: the app going to
   // the background while already sitting on "/jobs" and coming back
@@ -128,55 +166,54 @@ export default function JobListPage() {
   // again) brought the data back.
   useEffect(() => {
     const listenerPromise = App.addListener('resume', () => {
-      if (location.pathname === '/jobs') {
+      if (isJobsRoute) {
         void load()
       }
     })
     return () => {
       void listenerPromise.then((listener) => listener.remove())
     }
-  }, [location, load])
+  }, [isJobsRoute, load])
 
   async function handleRefresh(event: CustomEvent<RefresherEventDetail>) {
     try {
-      const result = await syncDown()
-      if (result.hasData && result.data) {
-        await upsertSyncData(result.data)
-      }
+      // Pull-to-refresh is a delta: only what changed since the last sync.
+      await syncDownAndStore('partial')
       await load()
     } finally {
       event.detail.complete()
     }
   }
 
-  async function handleStartJob(serRecId: number) {
-    await startJob(serRecId)
-    navigate(`/jobs/${serRecId}/wip`)
-  }
+  const filtered = useMemo(() => applyFilters(rows, query, dateFilter), [rows, query, dateFilter])
+  const isFiltered = query.trim() !== '' || dateFilter.preset !== 'all'
 
-  /**
-   * Pauses a job right from the list (DispatchStatus "40"/WIPPaused
-   * server-side, local_status = 'paused' locally) without navigating into
-   * WipPage first. Resuming a paused job reuses handleStartJob above - same
-   * as WipPage, there is no separate "resume" server call.
-   */
-  async function handlePauseJob(serRecId: number) {
-    setError(null)
-    setPausingSerRecId(serRecId)
+  function switchView(next: ViewMode) {
+    setView(next)
     try {
-      const result = await pauseJobOnServer(serRecId)
-      if (!result.hasData) {
-        setError(result.failMessage ?? 'Could not pause the job. Please try again.')
-        return
-      }
-      await pauseJobLocally(serRecId)
-      await load()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not reach the server. Try again once you have a connection.')
-    } finally {
-      setPausingSerRecId(null)
+      localStorage.setItem('jobs.viewMode', next)
+    } catch {
+      // per-viewer convenience only
     }
   }
+
+  function applyRange(value: string | string[] | null | undefined) {
+    // IonDatetime with presentation="date" multiple gives the picked days;
+    // the earliest and latest become the inclusive range.
+    const days = (Array.isArray(value) ? value : value ? [value] : []).map((v) => v.slice(0, 10)).sort()
+    if (days.length === 0) return
+    setDateFilter({ preset: 'range', from: days[0], to: days[days.length - 1] })
+  }
+
+  const rangeLabel =
+    dateFilter.preset === 'range'
+      ? dateFilter.from === dateFilter.to
+        ? formatDate(dateFilter.from)
+        : `${formatDate(dateFilter.from)} – ${formatDate(dateFilter.to)}`
+      : 'Pick dates'
+
+  const openJob = (serRecId: number) => navigate(`/jobs/${serRecId}`)
+  const resumeJob = (serRecId: number) => navigate(`/jobs/${serRecId}/wip`)
 
   return (
     <IonPage>
@@ -184,10 +221,56 @@ export default function JobListPage() {
         <IonToolbar>
           <IonTitle>My Jobs</IonTitle>
           <IonButtons slot="end">
+            <IonButton
+              onClick={() => switchView(view === 'list' ? 'calendar' : 'list')}
+              title={view === 'list' ? 'Calendar view' : 'List view'}
+            >
+              <IonIcon slot="icon-only" icon={view === 'list' ? calendarOutline : listOutline} />
+            </IonButton>
             <IonButton routerLink="/utilities">
               <IonIcon slot="icon-only" icon={settingsOutline} />
             </IonButton>
           </IonButtons>
+        </IonToolbar>
+        <IonToolbar>
+          <IonSearchbar
+            placeholder="Search job no, site, customer, address…"
+            value={query}
+            debounce={150}
+            onIonInput={(e) => setQuery(e.detail.value ?? '')}
+            onIonClear={() => setQuery('')}
+          />
+        </IonToolbar>
+        <IonToolbar>
+          <div style={{ display: 'flex', gap: 4, overflowX: 'auto', padding: '0 8px 4px', whiteSpace: 'nowrap' }}>
+            {DATE_PRESETS.map((p) => (
+              <IonChip
+                key={p.value}
+                color={dateFilter.preset === p.value ? 'primary' : 'medium'}
+                outline={dateFilter.preset !== p.value}
+                onClick={() => setDateFilter({ preset: p.value })}
+              >
+                <IonLabel>{p.label}</IonLabel>
+              </IonChip>
+            ))}
+            <IonChip
+              color={dateFilter.preset === 'range' ? 'primary' : 'medium'}
+              outline={dateFilter.preset !== 'range'}
+              onClick={() => setRangeOpen(true)}
+            >
+              <IonIcon icon={calendarOutline} />
+              <IonLabel>{rangeLabel}</IonLabel>
+              {dateFilter.preset === 'range' && (
+                <IonIcon
+                  icon={closeCircle}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setDateFilter({ preset: 'all' })
+                  }}
+                />
+              )}
+            </IonChip>
+          </div>
         </IonToolbar>
       </IonHeader>
       <IonContent>
@@ -201,56 +284,88 @@ export default function JobListPage() {
           </div>
         )}
 
+        {!loading && rows.length > 0 && filtered.length === 0 && (
+          <div className="ion-padding ion-text-center">
+            <p>No jobs match your search or date filter.</p>
+            <IonButton
+              fill="clear"
+              onClick={() => {
+                setQuery('')
+                setDateFilter({ preset: 'all' })
+              }}
+            >
+              Clear filters
+            </IonButton>
+          </div>
+        )}
+
         {error && (
           <IonText color="danger">
             <p className="ion-padding-start">{error}</p>
           </IonText>
         )}
 
-        <IonList>
-          {rows.map(({ job, siteLabel }) => {
-            const isThisWip = wipSerRecId === job.serRecId
-            const anotherJobIsWip = wipSerRecId != null && !isThisWip
-            const isPaused = job.localStatus === 'paused'
-            const isPausingThis = pausingSerRecId === job.serRecId
+        {isFiltered && filtered.length > 0 && (
+          <IonText color="medium">
+            <p className="ion-padding-horizontal" style={{ fontSize: 13, margin: '6px 0 0' }}>
+              {filtered.length} of {rows.length} jobs
+            </p>
+          </IonText>
+        )}
 
-            return (
-              <IonItem key={job.serRecId}>
-                <IonLabel className="ion-text-wrap">
-                  <h2>{job.docketRef ?? `Job #${job.serRecId}`}</h2>
-                  <p>{siteLabel}</p>
-                  <p>{job.probDesc}</p>
-                  {job.dispatchStatusDesc && (
-                    <IonNote color="medium">{job.dispatchStatusDesc}</IonNote>
-                  )}
-                </IonLabel>
-                {isThisWip && <IonBadge color="warning">In progress</IonBadge>}
-                {isPaused && !isThisWip && <IonBadge color="medium">Paused</IonBadge>}
-                <IonButton
-                  slot="end"
-                  fill={isThisWip ? 'solid' : 'outline'}
-                  disabled={anotherJobIsWip}
-                  onClick={() =>
-                    isThisWip ? navigate(`/jobs/${job.serRecId}/wip`) : handleStartJob(job.serRecId)
-                  }
-                >
-                  {isThisWip ? 'Resume' : isPaused ? 'Resume' : 'Start Job'}
-                </IonButton>
-                {isThisWip && (
-                  <IonButton
-                    slot="end"
-                    fill="outline"
-                    color="medium"
-                    disabled={isPausingThis}
-                    onClick={() => handlePauseJob(job.serRecId)}
-                  >
-                    Pause
-                  </IonButton>
-                )}
-              </IonItem>
-            )
-          })}
-        </IonList>
+        {view === 'list' ? (
+          <IonList>
+            {filtered.map((row) => (
+              <JobRowItem
+                key={row.job.serRecId}
+                row={row}
+                isCurrent={currentJob === row.job.serRecId}
+                currentState={currentState}
+                onOpen={openJob}
+                onResume={resumeJob}
+              />
+            ))}
+          </IonList>
+        ) : (
+          <JobCalendarView
+            rows={filtered}
+            currentJob={currentJob}
+            currentState={currentState}
+            onOpen={openJob}
+            onResume={resumeJob}
+          />
+        )}
+
+        <IonModal isOpen={rangeOpen} onDidDismiss={() => setRangeOpen(false)} initialBreakpoint={0.75} breakpoints={[0, 0.75, 1]}>
+          <IonHeader>
+            <IonToolbar>
+              <IonTitle>Filter by date</IonTitle>
+              <IonButtons slot="end">
+                <IonButton onClick={() => setRangeOpen(false)}>Done</IonButton>
+              </IonButtons>
+            </IonToolbar>
+          </IonHeader>
+          <IonContent className="ion-padding">
+            <IonText color="medium">
+              <p style={{ marginTop: 0 }}>Tap one day, or tap two days to filter everything between them.</p>
+            </IonText>
+            <IonDatetime
+              presentation="date"
+              multiple
+              value={
+                dateFilter.preset === 'range' && dateFilter.from && dateFilter.to
+                  ? dateFilter.from === dateFilter.to
+                    ? [dateFilter.from]
+                    : [dateFilter.from, dateFilter.to]
+                  : undefined
+              }
+              onIonChange={(e) => applyRange(e.detail.value)}
+              style={{ margin: '0 auto' }}
+            />
+          </IonContent>
+        </IonModal>
+
+        <IonToast isOpen={toast !== null} message={toast ?? ''} duration={4000} onDidDismiss={() => setToast(null)} />
       </IonContent>
     </IonPage>
   )

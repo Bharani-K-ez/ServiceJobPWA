@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   IonBackButton,
   IonButtons,
@@ -14,13 +15,14 @@ import {
   IonTitle,
   IonToolbar,
 } from '@ionic/react'
-import { syncDown } from '../api/syncV2'
-import { getLastSyncAt, pushPendingAssetServiceVisits, upsertSyncData } from '../db/localData'
+import type { SyncDownMode } from '../db/localData'
+import { describePushed, getLastSyncAt, pushPendingLocalChanges, syncDownAndStore } from '../db/localData'
 import { exportAndShareDiagnostics } from '../db/diagnostics'
 import { useAuth } from '../auth/AuthContext'
 
 export default function UtilitiesPage() {
   const { signOut } = useAuth()
+  const navigate = useNavigate()
 
   const [lastSyncAt, setLastSyncAt] = useState<string | null>(null)
   const [busyMessage, setBusyMessage] = useState<string | null>(null)
@@ -31,33 +33,39 @@ export default function UtilitiesPage() {
     void getLastSyncAt().then(setLastSyncAt)
   }, [])
 
-  async function handleSync() {
+  /**
+   * 'partial' (the everyday Sync item) pulls only what changed since the
+   * last sync; 'full' (the "Replace local data" item) wipes the synced
+   * tables and re-downloads everything - the recovery path if local data
+   * ever looks wrong. Both push pending local changes up first.
+   */
+  async function handleSync(mode: SyncDownMode) {
     setError(null)
     setMessage(null)
-    setBusyMessage('Syncing your jobs…')
+    setBusyMessage(mode === 'full' ? 'Downloading all your data…' : 'Syncing your jobs…')
     try {
-      // Push any locally-saved data up FIRST, before pulling fresh data
-      // down - a pull-down that landed before the push could otherwise
-      // refresh the legacy master AssetProperties values out from under a
-      // pending edit. See pushPendingAssetServiceVisits (shared with
-      // WipPage.handleCompleteJob) for the actual push. If it fails
-      // outright, or the server reports something it couldn't accept, stop
-      // here: the local data is untouched and safe, and this Sync can just
-      // be tried again once the issue is fixed.
-      const pushResult = await pushPendingAssetServiceVisits()
+      // Push any locally-saved data up FIRST - Asset Service visits, job
+      // status changes, employee time and any offline completions - before
+      // pulling fresh data down: a pull-down that landed before the push
+      // could otherwise refresh rows out from under a pending edit. See
+      // pushPendingLocalChanges (shared with WipPage) for the actual push.
+      // If it fails outright, or the server reports something it couldn't
+      // accept, stop here: the local data is untouched and safe, and this
+      // Sync can just be tried again once the issue is fixed.
+      const pushResult = await pushPendingLocalChanges()
       if (!pushResult.ok) {
         setError(pushResult.message)
         return
       }
 
-      const result = await syncDown()
-      if (!result.hasData || !result.data) {
-        setError(result.failMessage ?? 'Sync failed.')
+      const result = await syncDownAndStore(mode)
+      if (!result.ok) {
+        setError(result.message)
         return
       }
-      await upsertSyncData(result.data)
       setLastSyncAt(await getLastSyncAt())
-      setMessage('Sync complete.')
+      const sent = describePushed(pushResult.pushed)
+      setMessage(`${result.fullSync ? 'Full sync complete.' : 'Sync complete.'} ${sent ?? 'Nothing new to send'}.`)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not reach the server.')
     } finally {
@@ -101,18 +109,28 @@ export default function UtilitiesPage() {
       </IonHeader>
       <IonContent>
         <IonList inset>
-          <IonItem button onClick={handleSync}>
+          <IonItem button onClick={() => handleSync('partial')}>
             <IonLabel>
               <h2>Sync data to server</h2>
               <p>
-                Pulls your latest assigned jobs, sites, customers and assets. The app only
-                syncs automatically on your very first sign-in on this device - use this any
-                time afterward to get fresh data.
+                Sends your saved work up, then pulls down only what changed since your last
+                sync. The app only syncs automatically on your very first sign-in on this
+                device - use this any time afterward to get fresh data.
               </p>
             </IonLabel>
             {lastSyncAt && (
               <IonNote slot="end">{new Date(lastSyncAt).toLocaleString()}</IonNote>
             )}
+          </IonItem>
+
+          <IonItem button onClick={() => handleSync('full')}>
+            <IonLabel>
+              <h2>Replace local data</h2>
+              <p>
+                Sends your saved work up, then re-downloads everything from the server. Use
+                this if the job list ever looks out of date or incomplete.
+              </p>
+            </IonLabel>
           </IonItem>
 
           <IonItem button onClick={handleDiagnostics}>
@@ -121,6 +139,15 @@ export default function UtilitiesPage() {
               <p>Exports the local app database for troubleshooting.</p>
             </IonLabel>
           </IonItem>
+
+          {import.meta.env.DEV && (
+            <IonItem button onClick={() => navigate('/dev/db')}>
+              <IonLabel color="warning">
+                <h2>Local database (dev only)</h2>
+                <p>Browse and query the app&apos;s SQLite tables; download the .db file.</p>
+              </IonLabel>
+            </IonItem>
+          )}
 
           <IonItem button onClick={handleLogOut} detail={false}>
             <IonLabel color="danger">

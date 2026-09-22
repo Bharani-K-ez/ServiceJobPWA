@@ -1,85 +1,232 @@
 /**
  * Local SQLite schema. One row per synced entity, keyed by the same id the
- * API uses (SerRecID / SiteID / CustID / AssetGuid) so a re-sync can upsert
+ * API uses (SerRecID / SiteID / CustID / AssetGUID) so a re-sync can upsert
  * by primary key instead of wiping and reloading everything.
  *
- * `local_status` / `local_completed_at` on jobs are NOT part of the synced
+ * `local_status` / `local_completed_at` on ServiceRecord are NOT part of the synced
  * API data - they are this app's own offline workflow state (open -> wip ->
  * completed) and must survive a re-sync of the same job (see
  * db/localData.ts's upsertSyncData, which preserves them across re-inserts).
  */
 export const SCHEMA_STATEMENTS: string[] = [
-  `CREATE TABLE IF NOT EXISTS jobs (
-    serRecId INTEGER PRIMARY KEY NOT NULL,
-    docketRef TEXT,
-    siteId INTEGER,
-    callReceivedDt TEXT,
-    probDesc TEXT,
-    startDt TEXT,
-    finishDt TEXT,
-    status TEXT,
-    completed INTEGER NOT NULL DEFAULT 0,
-    serviceType TEXT,
-    description TEXT,
-    datePromisedDt TEXT,
-    timeFrame TEXT,
-    scheduledDate TEXT,
-    scheduledEndDate TEXT,
-    callerName TEXT,
-    jobNumber INTEGER,
-    priority INTEGER,
-    dispatchEng TEXT,
-    dispatchStatus TEXT,
-    dispatchStatusDesc TEXT,
-    system TEXT,
-    timeEst INTEGER,
+  // The four core tables use the legacy MAUI app's local table and column
+  // names (ServiceJobs.Models.ServiceRecord / AlarmSite / Customer /
+  // TblAsset, as created by sqlite-net in Data/SqLiteConfig.cs) so a
+  // downloaded .db reads the same in both apps and the SyncV2 DTOs map 1:1.
+  // local_status / local_completed_at on ServiceRecord are this app's own
+  // offline workflow state, not part of the legacy schema or the sync.
+  `CREATE TABLE IF NOT EXISTS ServiceRecord (
+    SerRecID INTEGER PRIMARY KEY NOT NULL,
+    SiteSystemID INTEGER,
+    DocketRef TEXT,
+    SiteID INTEGER,
+    CallReceivedDT TEXT,
+    CallType INTEGER,
+    ProbDesc TEXT,
+    StartDT TEXT,
+    FinishDT TEXT,
+    Status TEXT,
+    Completed INTEGER NOT NULL DEFAULT 0,
+    ServiceType TEXT,
+    Description TEXT,
+    Report TEXT,
+    DatePromisedDT TEXT,
+    Time_Frame TEXT,
+    ScheduledDate TEXT,
+    ScheduledEndDate TEXT,
+    SchDays INTEGER,
+    SchHours INTEGER,
+    SchMinutes INTEGER,
+    CallerName TEXT,
+    PrevMaintCarriedOut INTEGER NOT NULL DEFAULT 0,
+    EmpIDs TEXT,
+    CallModifiedBy TEXT,
+    CallModifiedOn TEXT,
+    System TEXT,
+    Updated TEXT,
+    JobNumber INTEGER,
+    Priority INTEGER,
+    DispatchEng TEXT,
+    DispatchStatus TEXT,
+    DispatchStatusDesc TEXT,
+    TimeEst INTEGER,
+    Labour REAL,
+    CallToConfirm INTEGER,
+    Installation INTEGER,
+    Maintenancectrl INTEGER,
+    EmergencyService INTEGER,
+    TemporaryDC INTEGER,
+    Cause TEXT,
+    Sent INTEGER NOT NULL DEFAULT 0,
+    SerRec_GUID TEXT,
+    RiskAssessment TEXT,
+    RiskAssessmentDate TEXT,
+    Deleted INTEGER NOT NULL DEFAULT 0,
+    ReferenceJob INTEGER,
+    CustContID INTEGER,
+    DocTempMapping TEXT,
     local_status TEXT NOT NULL DEFAULT 'open',
     local_completed_at TEXT
   );`,
-  `CREATE TABLE IF NOT EXISTS sites (
-    siteId INTEGER PRIMARY KEY NOT NULL,
-    siteRef TEXT,
-    occupant TEXT,
-    address TEXT,
-    town TEXT,
-    county TEXT,
-    areaCode TEXT,
-    postCode TEXT,
-    telephone TEXT,
-    custId INTEGER,
-    panelLocation TEXT,
-    note TEXT,
-    latitude REAL,
-    longitude REAL
+  `CREATE TABLE IF NOT EXISTS AlarmSite (
+    SiteID INTEGER PRIMARY KEY NOT NULL,
+    SiteRef TEXT,
+    Address TEXT,
+    Town TEXT,
+    County TEXT,
+    AreaCode TEXT,
+    Telephone TEXT,
+    PostCode TEXT,
+    CustID INTEGER,
+    CommissionedBy TEXT,
+    DateInstalled TEXT,
+    InstalledYN INTEGER NOT NULL DEFAULT 0,
+    MonCompany TEXT,
+    CPanelProdID REAL,
+    PanelLocation TEXT,
+    Occupant TEXT,
+    GardaURN TEXT,
+    Installer TEXT,
+    DigiNo TEXT,
+    RenewalDate TEXT,
+    MonFee REAL,
+    LastModified TEXT,
+    ModifiedBy TEXT,
+    CustomerType TEXT,
+    RadioID TEXT,
+    LabourRate REAL,
+    PercentRate REAL,
+    Updated TEXT,
+    ContractNo TEXT,
+    Latitude REAL,
+    Longitude REAL,
+    Note TEXT,
+    Email_Site TEXT,
+    SC_Emails TEXT,
+    UserDefined1 TEXT,
+    UserDefined2 TEXT,
+    UserDefined3 TEXT,
+    UserDefined4 TEXT,
+    Password TEXT,
+    UserCode TEXT,
+    Alarmsite_GUID TEXT,
+    Deleted INTEGER NOT NULL DEFAULT 0,
+    Sent INTEGER NOT NULL DEFAULT 0,
+    DigiType TEXT,
+    EngCode INTEGER,
+    SiteSMSNumbers TEXT,
+    PremiseType TEXT,
+    AlarmType TEXT,
+    URNAppliedForDate TEXT,
+    NSAICertNo TEXT,
+    FireAuthority TEXT,
+    PoliceAuthority TEXT,
+    InstallationId TEXT
   );`,
-  `CREATE TABLE IF NOT EXISTS customers (
-    custId INTEGER PRIMARY KEY NOT NULL,
-    organizationName TEXT,
-    firstName TEXT,
-    lastName TEXT,
-    address TEXT,
-    town TEXT,
-    county TEXT,
-    homePhone TEXT,
-    mobilePhone TEXT,
-    workPhone TEXT,
-    emailAddress TEXT,
-    accountsRef TEXT
+  `CREATE TABLE IF NOT EXISTS Customer (
+    CustID INTEGER PRIMARY KEY NOT NULL,
+    AccountsRef TEXT,
+    Prefix TEXT,
+    FirstName TEXT,
+    LastName TEXT,
+    EmailAddress TEXT,
+    OrganizationName TEXT,
+    Address TEXT,
+    Town TEXT,
+    County TEXT,
+    Country TEXT,
+    AreaCode TEXT,
+    HomePhone TEXT,
+    MobilePhone TEXT,
+    WorkPhone TEXT,
+    DirectDebit INTEGER NOT NULL DEFAULT 0,
+    Updated TEXT,
+    Deleted INTEGER NOT NULL DEFAULT 0
   );`,
-  `CREATE TABLE IF NOT EXISTS assets (
-    assetGuid TEXT PRIMARY KEY NOT NULL,
-    assetName TEXT,
-    assetType INTEGER,
-    siteId INTEGER,
-    assetModel TEXT,
-    assetDesc TEXT,
-    serialNo TEXT,
-    number TEXT,
-    location TEXT,
-    lastServiceDate TEXT,
-    nextServiceDate TEXT,
-    isActive INTEGER NOT NULL DEFAULT 1,
-    templateId INTEGER
+  `CREATE TABLE IF NOT EXISTS TblAsset (
+    AssetGUID TEXT PRIMARY KEY NOT NULL,
+    AssetName TEXT,
+    AssetDesc TEXT,
+    AssetType INTEGER,
+    ContractID INTEGER,
+    MaintIntervalUnit TEXT,
+    MaintInterval INTEGER,
+    TemplateID INTEGER,
+    SiteID INTEGER,
+    IsRental INTEGER NOT NULL DEFAULT 0,
+    NextServiceDate TEXT,
+    LastServiceDate TEXT,
+    Location TEXT,
+    SerialNo TEXT,
+    Number TEXT,
+    AssetModel TEXT,
+    InstallDate TEXT,
+    CreatedOn TEXT,
+    CreatedBy TEXT,
+    UpdatedOn TEXT,
+    UpdatedBy TEXT,
+    IsActive INTEGER NOT NULL DEFAULT 1,
+    LockedDateTime TEXT,
+    IsLocked INTEGER NOT NULL DEFAULT 0,
+    LockedByUser TEXT,
+    LockedSerRecId INTEGER NOT NULL DEFAULT 0,
+    IsRequired INTEGER NOT NULL DEFAULT 0,
+    Sent INTEGER NOT NULL DEFAULT 0,
+    Deleted INTEGER NOT NULL DEFAULT 0
+  );`,
+  // Employee time tracking - legacy MAUI table names again (Models/Entities
+  // Employee.cs / EmployeeTime.cs / TblCurrentTeam.cs). Employee comes down
+  // from SyncDown's `employee` list; EmployeeTime rows are opened/closed
+  // locally by db/jobState.ts and pushed up through SyncUp (`employeeTime`),
+  // and also come down from the server for the engineer's jobs; TblCurrentTeam
+  // is the device's current team (one row per member, holding the GUID of
+  // that member's currently-open EmployeeTime row, if any).
+  `CREATE TABLE IF NOT EXISTS Employee (
+    EmployeeID TEXT PRIMARY KEY NOT NULL,
+    Title TEXT,
+    FirstName TEXT,
+    MiddleName TEXT,
+    LastName TEXT,
+    MobilePhone TEXT,
+    WorkPhone TEXT,
+    IsEngineer INTEGER,
+    Updated TEXT,
+    Deleted INTEGER NOT NULL DEFAULT 0
+  );`,
+  `CREATE TABLE IF NOT EXISTS EmployeeTime (
+    tblEmployeeTime_GUID TEXT PRIMARY KEY NOT NULL,
+    ServiceID INTEGER NOT NULL,
+    EmployeeID TEXT NOT NULL,
+    StartDT TEXT NOT NULL,
+    FinishDT TEXT,
+    RateHour REAL,
+    TimeHours REAL,
+    Activity TEXT,
+    Updated TEXT,
+    Deleted INTEGER NOT NULL DEFAULT 0,
+    Sent INTEGER NOT NULL DEFAULT 0
+  );`,
+  `CREATE INDEX IF NOT EXISTS IX_EmployeeTime_ServiceID ON EmployeeTime (ServiceID);`,
+  `CREATE TABLE IF NOT EXISTS TblCurrentTeam (
+    Members TEXT PRIMARY KEY NOT NULL,
+    tblEmployeeTime_GUID TEXT
+  );`,
+  // Legacy TblLiveSync: one breadcrumb per state change / GPS fix / ETA save,
+  // pushed through SyncUp (`liveSync`) so the office sees where the engineer
+  // is and when they expect to arrive. Written by db/liveSync.ts.
+  `CREATE TABLE IF NOT EXISTS TblLiveSync (
+    ID TEXT PRIMARY KEY NOT NULL,
+    EmpID TEXT NOT NULL,
+    Latitude TEXT,
+    Longitude TEXT,
+    Activity TEXT,
+    SerRecID INTEGER,
+    Updated TEXT,
+    StateChange INTEGER NOT NULL DEFAULT 0,
+    ETA TEXT,
+    New_GPS INTEGER NOT NULL DEFAULT 0,
+    Team TEXT,
+    Sent INTEGER NOT NULL DEFAULT 0
   );`,
   `CREATE TABLE IF NOT EXISTS app_meta (
     key TEXT PRIMARY KEY NOT NULL,
@@ -253,7 +400,17 @@ export const SCHEMA_STATEMENTS: string[] = [
  * already part of the CREATE TABLE above.
  */
 export const MIGRATION_STATEMENTS: string[] = [
-  'ALTER TABLE assets ADD COLUMN templateId INTEGER',
+  // The core tables were renamed to the legacy MAUI names (jobs ->
+  // ServiceRecord, sites -> AlarmSite, customers -> Customer, assets ->
+  // TblAsset). Drop the old ones so a pre-rename install doesn't carry dead
+  // tables around. The next sync refills the new tables - with them empty,
+  // buildSyncDownRequest sends no verified ids, so the server treats every
+  // job/site as new to the device and sends them in full. Local job status
+  // from before the rename is not carried over.
+  'DROP TABLE IF EXISTS jobs',
+  'DROP TABLE IF EXISTS sites',
+  'DROP TABLE IF EXISTS customers',
+  'DROP TABLE IF EXISTS assets',
   'ALTER TABLE asset_service_properties ADD COLUMN serviceFlag INTEGER NOT NULL DEFAULT 0',
 ]
 
