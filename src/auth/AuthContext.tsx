@@ -7,7 +7,7 @@ import { getOfflineSessionAccount } from '../api/localAuth'
 type AuthStatus = 'loading' | 'authed' | 'anon'
 
 interface AuthContextValue {
-  status: AuthStatus
+  status:  AuthStatus
   /** Re-checks stored auth state - call after a successful login. */
   refresh: () => Promise<void>
   /** Clears the stored session and tenant code, then flips to 'anon'. */
