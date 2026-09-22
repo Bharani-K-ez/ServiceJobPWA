@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import {
-  IonBackButton,
   IonButton,
   IonButtons,
   IonContent,
@@ -29,6 +28,7 @@ import { getDocTemplate } from '../docTemplates/registry'
 import { buildBridgeScript } from '../docTemplates/bridge'
 import { buildCommonTokens, buildDocContextScript, substituteTemplate } from '../docTemplates/tokens'
 import SignaturePadModal from '../components/SignaturePadModal'
+import UpButton from '../components/UpButton'
 
 type BridgeMessage =
   | { docBridge: true; action: 'bridgeReady' }
@@ -373,7 +373,7 @@ export default function DocumentFormPage() {
       <IonHeader>
         <IonToolbar>
           <IonButtons slot="start">
-            <IonBackButton defaultHref={`/jobs/${serRecId}/wip`} />
+            <UpButton to={`/jobs/${serRecId}/wip`} />
           </IonButtons>
           <IonTitle>{title}</IonTitle>
         </IonToolbar>

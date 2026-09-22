@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { startupPath } from '../navigation/wipReturn'
 import {
   IonButton,
   IonCheckbox,
@@ -142,7 +143,9 @@ export default function LoginPage() {
       // page left mounted to (not) get hidden. The auth token was already
       // written to Preferences by login() above, so the fresh load lands
       // authed and RequireAuth sends it straight to the jobs list.
-      window.location.href = '/jobs'
+      // Land on the current job's WIP screen when one is under way (an
+      // engineer re-signing in mid-job), else the job list.
+      window.location.href = await startupPath()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Sign in failed. Please try again.')
     } finally {

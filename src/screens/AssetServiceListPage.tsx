@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useLocation, useParams } from 'react-router-dom'
 import {
-  IonBackButton,
   IonBadge,
   IonButton,
   IonButtons,
@@ -22,6 +21,7 @@ import {
   getWipAssetGuidsForJob,
   type LocalAsset,
 } from '../db/localData'
+import UpButton from '../components/UpButton'
 
 /** Fields a "wild" (contains, case/accent-insensitive) asset search matches against. */
 function assetSearchText(asset: LocalAsset): string {
@@ -77,7 +77,7 @@ export default function AssetServiceListPage() {
       <IonHeader>
         <IonToolbar>
           <IonButtons slot="start">
-            <IonBackButton defaultHref={`/jobs/${id}/wip`} />
+            <UpButton to={`/jobs/${id}/wip`} />
           </IonButtons>
           <IonTitle>Asset Service</IonTitle>
         </IonToolbar>

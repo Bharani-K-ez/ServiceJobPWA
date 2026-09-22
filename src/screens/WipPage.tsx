@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import {
   IonAlert,
-  IonBackButton,
   IonBadge,
   IonButton,
   IonButtons,
@@ -54,6 +53,8 @@ import { DOC_TEMPLATES } from '../docTemplates/registry'
 import { formatElapsed, formatHours, formatTime, secondsSince } from '../utils/format'
 import JobContactSheet from './JobContactSheet'
 import TravelPanel from './TravelPanel'
+import { clearWipPath } from '../navigation/wipReturn'
+import UpButton from '../components/UpButton'
 
 const STATE_LABEL: Record<JobState, string> = {
   TravelTo: 'Travelling to site',
@@ -147,6 +148,7 @@ export default function WipPage() {
     setBusy('Pausing job…')
     try {
       await pauseCurrentJob()
+      clearWipPath()
       void tryPushPendingLocalChanges()
       navigate('/jobs', { replace: true })
     } catch (err) {
@@ -163,6 +165,7 @@ export default function WipPage() {
       // 1. Close every team member's time row and stamp the job 50 locally -
       //    this works offline and is the source of truth for the hours.
       await completeCurrentJob()
+      clearWipPath()
 
       // 2. Push the time rows, the job status and any saved Asset Service
       //    visits. The server builds the completion report from what it
@@ -205,7 +208,7 @@ export default function WipPage() {
       <IonHeader>
         <IonToolbar>
           <IonButtons slot="start">
-            <IonBackButton defaultHref="/jobs" />
+            <UpButton to="/jobs" />
           </IonButtons>
           <IonTitle>{job?.docketRef ?? `Job #${id}`}</IonTitle>
           <IonButtons slot="end">

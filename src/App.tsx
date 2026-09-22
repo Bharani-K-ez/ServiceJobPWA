@@ -13,6 +13,8 @@ import AssetServiceInfoPage from './screens/AssetServiceInfoPage'
 import DocumentFormPage from './screens/DocumentFormPage'
 import UtilitiesPage from './screens/UtilitiesPage'
 import DevDbPage from './screens/DevDbPage'
+import FloatingMenu from './components/FloatingMenu'
+import StartupRedirect from './navigation/StartupRedirect'
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { status } = useAuth()
@@ -153,6 +155,10 @@ function AppRoutes() {
          * first render. An empty array contributes no children at all. */}
         {devRoutes}
       </IonRouterOutlet>
+      {/* Bottom-corner section menu (WIP / Jobs List / Utilities) - a sibling
+       * of the outlet so it floats over whichever page is showing. */}
+      <FloatingMenu />
+      <StartupRedirect />
     </IonReactRouter>
   )
 }

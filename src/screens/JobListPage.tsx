@@ -27,6 +27,7 @@ import { getCustomerById, getOpenJobs, getSiteById, syncDownAndStore } from '../
 import { getEngineerState, type JobState } from '../db/jobState'
 import { formatDate } from '../utils/format'
 import JobRowItem from './jobs/JobRowItem'
+import { wipPathFor } from '../navigation/wipReturn'
 import JobCalendarView from './jobs/JobCalendarView'
 import { applyFilters, buildJobRow, type DateFilter, type DatePreset, type JobRow } from './jobs/jobFilters'
 
@@ -216,7 +217,7 @@ export default function JobListPage() {
       : 'Pick dates'
 
   const openJob = (serRecId: number) => navigate(`/jobs/${serRecId}`)
-  const resumeJob = (serRecId: number) => navigate(`/jobs/${serRecId}/wip`)
+  const resumeJob = (serRecId: number) => navigate(wipPathFor(serRecId))
 
   return (
     <IonPage>

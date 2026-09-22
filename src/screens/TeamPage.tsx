@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import {
-  IonBackButton,
   IonButton,
   IonButtons,
   IonCheckbox,
@@ -30,6 +29,7 @@ import {
   type TeamCandidate,
 } from '../db/jobState'
 import { getJobById, tryPushPendingLocalChanges } from '../db/localData'
+import UpButton from '../components/UpButton'
 
 type StartState = 'TravelTo' | 'On Work'
 
@@ -136,7 +136,7 @@ export default function TeamPage() {
       <IonHeader>
         <IonToolbar>
           <IonButtons slot="start">
-            <IonBackButton defaultHref={`/jobs/${id}`} />
+            <UpButton to={startState ? `/jobs/${id}` : `/jobs/${id}/wip`} />
           </IonButtons>
           <IonTitle>Team · {jobLabel}</IonTitle>
         </IonToolbar>

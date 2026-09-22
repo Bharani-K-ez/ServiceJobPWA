@@ -34,6 +34,7 @@ import { declineJob, getEngineerState, getJobHoursSummary, type EngineerState } 
 import { getJobById, tryPushPendingLocalChanges } from '../db/localData'
 import { formatDate, formatDateTime, formatHours } from '../utils/format'
 import JobContactSheet from './JobContactSheet'
+import { wipPathFor } from '../navigation/wipReturn'
 
 /**
  * Job details, reached by tapping a job in the list. The four actions the
@@ -258,7 +259,7 @@ export default function JobDetailPage() {
               {isCurrent ? (
                 <IonRow>
                   <IonCol size="8">
-                    <IonButton expand="block" color="warning" onClick={() => navigate(`/jobs/${id}/wip`)}>
+                    <IonButton expand="block" color="warning" onClick={() => navigate(wipPathFor(id))}>
                       <IonIcon slot="start" icon={playOutline} />
                       Resume
                     </IonButton>

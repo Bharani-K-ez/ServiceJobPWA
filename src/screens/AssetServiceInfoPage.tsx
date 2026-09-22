@@ -3,7 +3,6 @@ import { useNavigate, useParams } from 'react-router-dom'
 import {
   IonAccordion,
   IonAccordionGroup,
-  IonBackButton,
   IonButton,
   IonButtons,
   IonCheckbox,
@@ -48,6 +47,7 @@ import {
 } from '../db/localData'
 import { getFieldValue, isFieldMissing, setFieldValue } from '../db/dynamicFields'
 import DynamicField from '../components/DynamicField'
+import UpButton from '../components/UpButton'
 
 /**
  * The dynamic "Asset Service information" screen. Header fields
@@ -438,7 +438,7 @@ export default function AssetServiceInfoPage() {
       <IonHeader>
         <IonToolbar>
           <IonButtons slot="start">
-            <IonBackButton defaultHref={`/jobs/${serRecId}/assets`} />
+            <UpButton to={`/jobs/${serRecId}/assets`} />
           </IonButtons>
           <IonTitle>{asset?.assetName ?? 'Asset'}</IonTitle>
         </IonToolbar>
