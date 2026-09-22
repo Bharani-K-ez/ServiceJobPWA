@@ -34,6 +34,20 @@ function RequireAuth({ children }: { children: ReactNode }) {
   return <>{children}</>
 }
 
+const devRoutes = import.meta.env.DEV
+  ? [
+      <Route
+        key="dev-db"
+        path="/dev/db"
+        element={
+          <RequireAuth>
+            <DevDbPage />
+          </RequireAuth>
+        }
+      />,
+    ]
+  : []
+
 function AppRoutes() {
   return (
     <IonReactRouter>
@@ -131,17 +145,13 @@ function AppRoutes() {
         />
         {/* Dev-only local SQLite browser. `import.meta.env.DEV` is a
          * compile-time constant, so in a production build this whole route
-         * (and DevDbPage's code) is eliminated by Vite. */}
-        {import.meta.env.DEV && (
-          <Route
-            path="/dev/db"
-            element={
-              <RequireAuth>
-                <DevDbPage />
-              </RequireAuth>
-            }
-          />
-        )}
+         * (and DevDbPage's code) is eliminated by Vite. Rendered as an array
+         * rather than `{DEV && <Route/>}`: a `false` child becomes `null`
+         * inside IonRouterOutlet's child walk (React.Children.forEach), and
+         * @ionic/react-router crashes on it with "Cannot read properties of
+         * null (reading 'type')" - which broke the production build's very
+         * first render. An empty array contributes no children at all. */}
+        {devRoutes}
       </IonRouterOutlet>
     </IonReactRouter>
   )
