@@ -530,7 +530,13 @@ export default function LeavePage() {
           message={confirmDelete ? `${confirmDelete.type}, ${formatDate(confirmDelete.leaveFrom)} – ${formatDate(confirmDelete.leaveTo)} will be removed from the office planner.` : ''}
           buttons={[
             { text: 'Keep', role: 'cancel', handler: () => setConfirmDelete(null) },
-            { text: 'Cancel leave', role: 'destructive', handler: () => confirmDelete && void remove(confirmDelete) },
+            {
+              text: 'Cancel leave',
+              role: 'destructive',
+              handler: () => {
+                if (confirmDelete) void remove(confirmDelete)
+              },
+            },
           ]}
           onDidDismiss={() => setConfirmDelete(null)}
         />
