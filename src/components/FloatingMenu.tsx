@@ -20,7 +20,7 @@ const ITEMS: MenuItem[] = [
 ]
 
 function sectionFor(pathname: string): Section {
-  if (pathname.startsWith('/utilities') || pathname.startsWith('/dev/')) return 'utilities'
+  if (pathname.startsWith('/utilities') || pathname.startsWith('/leave') || pathname.startsWith('/dev/')) return 'utilities'
   if (/^\/jobs\/\d+\/(wip|crew|team|assets|documents)/.test(pathname)) return 'wip'
   return 'jobs'
 }

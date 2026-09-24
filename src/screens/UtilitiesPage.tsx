@@ -170,6 +170,13 @@ export default function UtilitiesPage() {
             </IonLabel>
           </IonItem>
 
+          <IonItem button onClick={() => navigate('/leave')}>
+            <IonLabel>
+              <h2>Leave</h2>
+              <p>Apply for leave and see what you have booked - the office&apos;s Leave Planner, for you. Needs a connection.</p>
+            </IonLabel>
+          </IonItem>
+
           <IonItem button onClick={() => setScheduleOpen(true)}>
             <IonLabel className="ion-text-wrap">
               <h2>Automatic sync</h2>
