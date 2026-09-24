@@ -3,8 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { IonIcon, IonToast } from '@ionic/react'
 import { closeOutline, constructOutline, listOutline, settingsOutline } from 'ionicons/icons'
 import { useAuth } from '../auth/AuthContext'
-import { getEngineerState } from '../db/jobState'
-import { rememberWipPath, wipPathFor } from '../navigation/wipReturn'
+import { activeWorkPath, rememberWipPath } from '../navigation/wipReturn'
 
 type Section = 'wip' | 'jobs' | 'utilities'
 
@@ -22,7 +21,7 @@ const ITEMS: MenuItem[] = [
 
 function sectionFor(pathname: string): Section {
   if (pathname.startsWith('/utilities') || pathname.startsWith('/dev/')) return 'utilities'
-  if (/^\/jobs\/\d+\/(wip|team|assets|documents)/.test(pathname)) return 'wip'
+  if (/^\/jobs\/\d+\/(wip|crew|team|assets|documents)/.test(pathname)) return 'wip'
   return 'jobs'
 }
 
@@ -64,11 +63,11 @@ export default function FloatingMenu() {
     } else if (section === 'utilities') {
       navigate('/utilities')
     } else {
-      const { currentJob } = await getEngineerState()
-      if (currentJob) {
-        navigate(wipPathFor(currentJob))
+      const target = await activeWorkPath()
+      if (target) {
+        navigate(target)
       } else {
-        setToast('No job in progress. Open a job from the list and press Travel To or Start Job.')
+        setToast('No job in progress. Open a job from the list and press Travel To, Start Job or Clock In.')
       }
     }
   }

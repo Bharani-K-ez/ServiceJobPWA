@@ -33,9 +33,17 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths"></meta-data>
         </provider>
+
+        <!-- FCM: channel used for notifications the server sends without an explicit channel
+             (created at runtime by src/push/pushNotifications.ts, same name as the MAUI app's). -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="fcm_default_channel" />
     </application>
 
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Push notifications (Android 13+ runtime prompt - requested by src/push/pushNotifications.ts) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 </manifest>

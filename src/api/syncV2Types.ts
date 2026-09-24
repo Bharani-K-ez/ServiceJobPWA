@@ -206,6 +206,26 @@ export interface SyncV2EmployeeDto {
   updated: string | null
 }
 
+/** Db.EzFieldSMSetting rows for "All" + this engineer - SyncV2Response.Setting. */
+export interface SyncV2SettingDto {
+  engineer: string
+  settingID: string
+  settingValue: string | null
+  updated: string | null
+}
+
+/** Db.JobCrew for every job in the bundle (all engineers' rows) - SyncV2Response.JobCrew. */
+export interface SyncV2JobCrewDto {
+  iD: number
+  serRecID: number
+  engName: string
+  scheduledStart: string | null
+  scheduledEnd: string | null
+  jobType: string | null
+  newSerRecID: number | null
+  splitIntoDaily: boolean
+}
+
 /** Db.tblEmployeeTime for the engineer's jobs - SyncV2Response.EmployeeTime. */
 export interface SyncV2EmployeeTimeDto {
   employeeTimeGuid: string
@@ -347,6 +367,8 @@ export interface SyncV2ResponseDto {
   assetProperties: SyncV2AssetPropertyDto[]
   employee: SyncV2EmployeeDto[]
   employeeTime: SyncV2EmployeeTimeDto[]
+  jobCrew?: SyncV2JobCrewDto[]
+  setting?: SyncV2SettingDto[]
   [legacyTable: string]: unknown
 }
 

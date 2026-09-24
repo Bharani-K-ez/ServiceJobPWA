@@ -211,6 +211,31 @@ export const SCHEMA_STATEMENTS: string[] = [
     Members TEXT PRIMARY KEY NOT NULL,
     tblEmployeeTime_GUID TEXT
   );`,
+  // Legacy EzFieldSMSetting: tenant / engineer settings from SyncDown's
+  // `setting` list (Engineer = 'All' or this engineer). Read by
+  // sync/syncSettings.ts for the automatic-sync schedule, among others.
+  `CREATE TABLE IF NOT EXISTS EzFieldSMSetting (
+    Engineer TEXT NOT NULL,
+    SettingID TEXT NOT NULL,
+    SettingValue TEXT,
+    Updated TEXT,
+    PRIMARY KEY (Engineer, SettingID)
+  );`,
+  // Crew module - Db.JobCrew: one row per engineer per scheduled slot of a
+  // job. Read-only on the device (comes down with every sync, replaced per
+  // job). db/crew.ts derives the engineer's role (lead vs crew) and the
+  // job's slots from it.
+  `CREATE TABLE IF NOT EXISTS JobCrew (
+    ID INTEGER PRIMARY KEY NOT NULL,
+    SerRecID INTEGER NOT NULL,
+    EngName TEXT NOT NULL,
+    ScheduledStart TEXT,
+    ScheduledEnd TEXT,
+    JobType TEXT,
+    NewSerRecID INTEGER,
+    SplitIntoDaily INTEGER NOT NULL DEFAULT 0
+  );`,
+  `CREATE INDEX IF NOT EXISTS IX_JobCrew_SerRecID ON JobCrew (SerRecID);`,
   // Legacy TblLiveSync: one breadcrumb per state change / GPS fix / ETA save,
   // pushed through SyncUp (`liveSync`) so the office sees where the engineer
   // is and when they expect to arrive. Written by db/liveSync.ts.

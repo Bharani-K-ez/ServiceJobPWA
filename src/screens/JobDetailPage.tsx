@@ -32,6 +32,8 @@ import { callOutline, carOutline, closeCircleOutline, playOutline, timeOutline }
 import { useJobDetails } from '../hooks/useJobDetails'
 import { declineJob, getEngineerState, getJobHoursSummary, type EngineerState } from '../db/jobState'
 import { getJobById, tryPushPendingLocalChanges } from '../db/localData'
+import { getJobCrew, getJobRole, getJobSlots, type JobRole, type JobSlot } from '../db/crew'
+import { formatSlots } from '../utils/slots'
 import { formatDate, formatDateTime, formatHours } from '../utils/format'
 import JobContactSheet from './JobContactSheet'
 import { wipPathFor } from '../navigation/wipReturn'
@@ -53,6 +55,9 @@ export default function JobDetailPage() {
   const [engineer, setEngineer] = useState<EngineerState>({ currentJob: null, currentState: 'Unknown' })
   const [currentJobLabel, setCurrentJobLabel] = useState<string | null>(null)
   const [hours, setHours] = useState<{ labour: number; travel: number }>({ labour: 0, travel: 0 })
+  const [role, setRole] = useState<JobRole>('lead')
+  const [slots, setSlots] = useState<JobSlot[]>([])
+  const [crew, setCrew] = useState<{ displayName: string; isLead: boolean }[]>([])
   const [contactOpen, setContactOpen] = useState(false)
   const [declineOpen, setDeclineOpen] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -68,6 +73,10 @@ export default function JobDetailPage() {
       setCurrentJobLabel(null)
     }
     setHours(await getJobHoursSummary(id))
+    const [r, s, c] = await Promise.all([getJobRole(id), getJobSlots(id), getJobCrew(id)])
+    setRole(r)
+    setSlots(s)
+    setCrew(c)
   }, [id])
 
   // Re-read on every arrival at this route - see JobListPage for why a
@@ -135,6 +144,8 @@ export default function JobDetailPage() {
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
                   {isCurrent && <IonBadge color="warning">Current job</IonBadge>}
                   {isPaused && !isCurrent && <IonBadge color="medium">Paused</IonBadge>}
+                  {role === 'crew' && <IonBadge color="tertiary">Crew job</IonBadge>}
+                  {role === 'lead' && slots.length > 0 && <IonBadge color="success">Lead</IonBadge>}
                   {job.localStatus === 'completed' && <IonBadge color="success">Completed</IonBadge>}
                   {job.localStatus === 'declined' && <IonBadge color="danger">Declined</IonBadge>}
                   {job.dispatchStatusDesc && <IonBadge color="light">{job.dispatchStatusDesc}</IonBadge>}
@@ -151,15 +162,27 @@ export default function JobDetailPage() {
                 </IonLabel>
               </IonItem>
               <IonItem>
-                <IonLabel>
-                  <h3>Scheduled</h3>
-                  <p>
-                    {formatDate(job.scheduledDate)}
-                    {job.timeFrame ? ` · ${job.timeFrame}` : ''}
-                  </p>
+                <IonLabel className="ion-text-wrap">
+                  <h3>{slots.length > 1 ? 'Scheduled slots' : 'Scheduled'}</h3>
+                  {slots.length > 0 ? (
+                    slots.map((s) => <p key={s.id}>{formatSlots([s])}</p>)
+                  ) : (
+                    <p>
+                      {formatDate(job.scheduledDate)}
+                      {job.timeFrame ? ` · ${job.timeFrame}` : ''}
+                    </p>
+                  )}
                 </IonLabel>
                 {job.timeEst > 0 && <IonNote slot="end">est. {formatHours(job.timeEst)}</IonNote>}
               </IonItem>
+              {crew.length > 0 && (
+                <IonItem>
+                  <IonLabel className="ion-text-wrap">
+                    <h3>Crew</h3>
+                    <p>{crew.map((m) => (m.isLead ? `${m.displayName} (lead)` : m.displayName)).join(', ')}</p>
+                  </IonLabel>
+                </IonItem>
+              )}
               <IonItem>
                 <IonLabel>
                   <h3>Service type</h3>
@@ -256,7 +279,24 @@ export default function JobDetailPage() {
         <IonFooter>
           <IonToolbar>
             <IonGrid>
-              {isCurrent ? (
+              {role === 'crew' ? (
+                // Crew member: time sheet only - no Travel To / Start / Decline,
+                // and nothing here ever amends the job record.
+                <IonRow>
+                  <IonCol size="8">
+                    <IonButton expand="block" color="tertiary" onClick={() => navigate(`/jobs/${id}/crew`)}>
+                      <IonIcon slot="start" icon={playOutline} />
+                      Clock In
+                    </IonButton>
+                  </IonCol>
+                  <IonCol size="4">
+                    <IonButton expand="block" fill="outline" onClick={() => setContactOpen(true)}>
+                      <IonIcon slot="start" icon={callOutline} />
+                      Contact
+                    </IonButton>
+                  </IonCol>
+                </IonRow>
+              ) : isCurrent ? (
                 <IonRow>
                   <IonCol size="8">
                     <IonButton expand="block" color="warning" onClick={() => navigate(wipPathFor(id))}>

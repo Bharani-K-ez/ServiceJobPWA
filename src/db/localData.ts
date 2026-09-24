@@ -1,7 +1,9 @@
 import { clearStaleTransaction, getDb, persist } from './sqlite'
 import { syncDown, syncUp } from '../api/syncV2'
 import { completeJobOnServer } from '../api/syncV2'
+import { reconcileCrewClock } from './crew'
 import type {
+  SyncUpRequestDto,
   EmployeeTimeUpDto,
   JobUpDto,
   LiveSyncUpDto,
@@ -12,6 +14,8 @@ import type {
   SyncV2CustomerDto,
   SyncV2EmployeeDto,
   SyncV2EmployeeTimeDto,
+  SyncV2JobCrewDto,
+  SyncV2SettingDto,
   SyncDownRequestDto,
   SyncV2ResponseDto,
   SyncV2SiteDto,
@@ -420,12 +424,19 @@ export async function upsertSyncData(data: SyncV2ResponseDto): Promise<void> {
       await db.run('DELETE FROM Customer', [], false)
       await db.run('DELETE FROM TblAsset', [], false)
       await db.run('DELETE FROM Employee', [], false)
+      await db.run('DELETE FROM JobCrew', [], false)
+      await db.run('DELETE FROM EzFieldSMSetting', [], false)
       // Time rows still waiting to go up (Sent = 0) are the device's own
       // work and must survive a full refresh; everything else is re-sent.
       await db.run('DELETE FROM EmployeeTime WHERE Sent = 1', [], false)
     } else if (data.delJobIds.length > 0) {
       await db.run(
         `DELETE FROM ServiceRecord WHERE SerRecID IN (${data.delJobIds.map(() => '?').join(', ')})`,
+        data.delJobIds,
+        false,
+      )
+      await db.run(
+        `DELETE FROM JobCrew WHERE SerRecID IN (${data.delJobIds.map(() => '?').join(', ')})`,
         data.delJobIds,
         false,
       )
@@ -544,6 +555,41 @@ export async function upsertSyncData(data: SyncV2ResponseDto): Promise<void> {
           false,
         )
       }
+    }
+
+    // JobCrew has no Updated column, so the server sends every row for
+    // every job in the bundle each time: replace per job (delete that
+    // job's rows, insert what arrived). A job that arrived with no crew
+    // rows keeps none.
+    const crewRows = data.jobCrew ?? []
+    if (!data.fullSync) {
+      const jobIdsInBundle = Array.from(new Set(data.serviceRecord.map((j) => j.serRecID)))
+      const crewJobIds = Array.from(new Set(crewRows.map((c) => c.serRecID)))
+      const toClear = Array.from(new Set([...jobIdsInBundle, ...crewJobIds]))
+      if (toClear.length > 0) {
+        await db.run(`DELETE FROM JobCrew WHERE SerRecID IN (${placeholders(toClear.length)})`, toClear, false)
+      }
+    }
+    if (crewRows.length > 0) {
+      await db.executeSet(
+        crewRows.map((c: SyncV2JobCrewDto) => ({
+          statement: `INSERT OR REPLACE INTO JobCrew (ID, SerRecID, EngName, ScheduledStart, ScheduledEnd, JobType, NewSerRecID, SplitIntoDaily)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          values: [c.iD, c.serRecID, c.engName, c.scheduledStart, c.scheduledEnd, c.jobType, c.newSerRecID, c.splitIntoDaily ? 1 : 0],
+        })),
+        false,
+      )
+    }
+
+    const settingRows = data.setting ?? []
+    if (settingRows.length > 0) {
+      await db.executeSet(
+        settingRows.map((s: SyncV2SettingDto) => ({
+          statement: `INSERT OR REPLACE INTO EzFieldSMSetting (Engineer, SettingID, SettingValue, Updated) VALUES (?, ?, ?, ?)`,
+          values: [s.engineer, s.settingID, s.settingValue, s.updated],
+        })),
+        false,
+      )
     }
 
     // common_categories / common_category_props are pure reference/config
@@ -708,7 +754,9 @@ export async function buildSyncDownRequest(mode: SyncDownMode): Promise<SyncDown
   }
 }
 
-export type SyncDownResult = { ok: true; fullSync: boolean } | { ok: false; message: string }
+export type SyncDownResult =
+  | { ok: true; fullSync: boolean; crewClockClosed: boolean }
+  | { ok: false; message: string }
 
 /**
  * The one entry point for pulling data down: builds the request for the
@@ -726,7 +774,11 @@ export async function syncDownAndStore(mode: SyncDownMode): Promise<SyncDownResu
       return { ok: false, message: result.failMessage ?? 'Sync failed.' }
     }
     await upsertSyncData(result.data)
-    return { ok: true, fullSync: result.data.fullSync }
+    // A crew job the lead has completed drops out of the bundle - close the
+    // crew member's running clock so their hours still go up.
+    const crewClockClosed = await reconcileCrewClock()
+    if (crewClockClosed) void tryPushPendingLocalChanges()
+    return { ok: true, fullSync: result.data.fullSync, crewClockClosed }
   } catch (err) {
     return {
       ok: false,
@@ -1571,6 +1623,87 @@ export async function pushPendingLocalChanges(): Promise<PushPendingResult> {
     return { ok: false, pushed, message: `${problems.join('. ')}. They will be retried on the next Sync.` }
   }
   return { ok: true, pushed }
+}
+
+// ---------------------------------------------------------------- background outbox
+
+/**
+ * Snapshot of everything pending, for the background heartbeat (see
+ * sync/backgroundSync.ts). `stamps` records each row's Updated value at
+ * snapshot time so confirmations can be applied later ONLY if the row has
+ * not changed again in between (a row edited after the snapshot keeps
+ * Sent = 0 and goes up with the next push).
+ */
+export interface OutboxSnapshot {
+  request: SyncUpRequestDto | null
+  stamps: {
+    jobs: Record<string, string | null>
+    times: Record<string, string | null>
+    liveSync: string[]
+  }
+}
+
+export async function getOutboxSnapshot(): Promise<OutboxSnapshot> {
+  const [jobs, times, locations] = await Promise.all([getPendingJobRows(), getPendingTimeRows(), getPendingLiveSyncRows()])
+  const db = await getDb()
+  const jobStamps = rowsOf<{ SerRecID: number; Updated: string | null }>(
+    await db.query('SELECT SerRecID, Updated FROM ServiceRecord WHERE Sent = 0'),
+  )
+  const timeStamps = rowsOf<{ tblEmployeeTime_GUID: string; Updated: string | null }>(
+    await db.query('SELECT tblEmployeeTime_GUID, Updated FROM EmployeeTime WHERE Sent = 0 AND Deleted = 0'),
+  )
+  const empty = jobs.length === 0 && times.length === 0 && locations.length === 0
+  return {
+    request: empty
+      ? null
+      : {
+          deviceDateTime: new Date().toISOString(),
+          serviceRecord: jobs.length > 0 ? jobs : undefined,
+          employeeTime: times.length > 0 ? times : undefined,
+          liveSync: locations.length > 0 ? locations : undefined,
+        },
+    stamps: {
+      jobs: Object.fromEntries(jobStamps.map((r) => [String(r.SerRecID), r.Updated])),
+      times: Object.fromEntries(timeStamps.map((r) => [r.tblEmployeeTime_GUID.toUpperCase(), r.Updated])),
+      liveSync: locations.map((l) => l.id.toUpperCase()),
+    },
+  }
+}
+
+export interface OutboxConfirmations {
+  serviceRecord?: number[]
+  employeeTime?: string[]
+  liveSync?: string[]
+}
+
+/** Marks rows the background heartbeat got confirmed as Sent = 1 - only if unchanged since the snapshot. */
+export async function applyOutboxConfirmations(confirmed: OutboxConfirmations, stamps: OutboxSnapshot['stamps']): Promise<number> {
+  const db = await getDb()
+  await clearStaleTransaction(db)
+  let applied = 0
+  for (const id of confirmed.serviceRecord ?? []) {
+    const stamp = stamps.jobs[String(id)]
+    if (stamp === undefined) continue
+    const res = await db.run('UPDATE ServiceRecord SET Sent = 1 WHERE SerRecID = ? AND Sent = 0 AND (Updated IS ? OR Updated = ?)', [id, stamp, stamp])
+    applied += res.changes?.changes ?? 0
+  }
+  for (const guid of confirmed.employeeTime ?? []) {
+    const key = guid.toUpperCase()
+    const stamp = stamps.times[key]
+    if (stamp === undefined) continue
+    const res = await db.run(
+      'UPDATE EmployeeTime SET Sent = 1 WHERE upper(tblEmployeeTime_GUID) = ? AND Sent = 0 AND (Updated IS ? OR Updated = ?)',
+      [key, stamp, stamp],
+    )
+    applied += res.changes?.changes ?? 0
+  }
+  const live = (confirmed.liveSync ?? []).map((k) => k.toUpperCase()).filter((k) => stamps.liveSync.includes(k))
+  if (live.length > 0) {
+    const res = await db.run(`UPDATE TblLiveSync SET Sent = 1 WHERE upper(ID) IN (${placeholders(live.length)})`, live)
+    applied += res.changes?.changes ?? 0
+  }
+  if (applied > 0) await persist()
+  return applied
 }
 
 async function db_deleteSentLiveSync(): Promise<void> {

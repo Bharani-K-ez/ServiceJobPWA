@@ -11,6 +11,7 @@ interface Props {
   rows: JobRow[]
   currentJob: number | null
   currentState: JobState
+  currentLabel?: string
   onOpen: (serRecId: number) => void
   onResume: (serRecId: number) => void
 }
@@ -38,7 +39,7 @@ function shortDay(d: Date): string {
  *  Week  - Mon..Sun strip with a count per day; tap a day to see its agenda.
  *  Month - classic grid with a count bubble per day; tap a day for its agenda.
  */
-export default function JobCalendarView({ rows, currentJob, currentState, onOpen, onResume }: Props) {
+export default function JobCalendarView({ rows, currentJob, currentState, currentLabel, onOpen, onResume }: Props) {
   const [mode, setMode] = useState<CalendarMode>(() => {
     try {
       const saved = localStorage.getItem('jobs.calendarMode')
@@ -51,18 +52,21 @@ export default function JobCalendarView({ rows, currentJob, currentState, onOpen
 
   const byDay = useMemo(() => {
     const map = new Map<string, JobRow[]>()
+    // A crew-scheduled job shows on every day it has a slot.
     for (const r of rows) {
-      if (!r.scheduledDay) continue
-      const list = map.get(r.scheduledDay) ?? []
-      list.push(r)
-      map.set(r.scheduledDay, list)
+      for (const day of r.scheduledDays) {
+        const list = map.get(day) ?? []
+        list.push(r)
+        map.set(day, list)
+      }
     }
-    for (const list of map.values()) {
-      list.sort((a, b) => (a.job.scheduledDate ?? '').localeCompare(b.job.scheduledDate ?? ''))
+    for (const [day, list] of map) {
+      const timeOn = (r: JobRow) => r.slots.find((s) => s.start?.startsWith(day))?.start ?? r.job.scheduledDate ?? ''
+      list.sort((a, b) => timeOn(a).localeCompare(timeOn(b)))
     }
     return map
   }, [rows])
-  const unscheduled = useMemo(() => rows.filter((r) => !r.scheduledDay), [rows])
+  const unscheduled = useMemo(() => rows.filter((r) => r.scheduledDays.length === 0), [rows])
 
   const selected = fromDayKey(selectedDay)
   const todayKey = toDayKey(new Date())
@@ -153,6 +157,7 @@ export default function JobCalendarView({ rows, currentJob, currentState, onOpen
             compact
             isCurrent={currentJob === row.job.serRecId}
             currentState={currentState}
+            currentLabel={currentLabel}
             onOpen={onOpen}
             onResume={onResume}
           />
@@ -173,6 +178,7 @@ export default function JobCalendarView({ rows, currentJob, currentState, onOpen
               row={row}
               isCurrent={currentJob === row.job.serRecId}
               currentState={currentState}
+              currentLabel={currentLabel}
               onOpen={onOpen}
               onResume={onResume}
             />

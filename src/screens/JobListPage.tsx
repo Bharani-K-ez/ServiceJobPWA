@@ -25,6 +25,7 @@ import {
 import { calendarOutline, closeCircle, listOutline, settingsOutline } from 'ionicons/icons'
 import { getCustomerById, getOpenJobs, getSiteById, syncDownAndStore } from '../db/localData'
 import { getEngineerState, type JobState } from '../db/jobState'
+import { getCrewClock, getJobRoles, getMySlotsByJob, type CrewClock } from '../db/crew'
 import { formatDate } from '../utils/format'
 import JobRowItem from './jobs/JobRowItem'
 import { wipPathFor } from '../navigation/wipReturn'
@@ -69,6 +70,7 @@ export default function JobListPage() {
   const [rangeOpen, setRangeOpen] = useState(false)
   const [currentJob, setCurrentJob] = useState<number | null>(null)
   const [currentState, setCurrentState] = useState<JobState>('Unknown')
+  const [crewClock, setCrewClock] = useState<CrewClock | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   // One-shot message handed over by WipPage after completing a job (see its
@@ -87,12 +89,14 @@ export default function JobListPage() {
   const load = useCallback(async () => {
     setError(null)
     try {
-      const [jobs, engineer] = await Promise.all([getOpenJobs(), getEngineerState()])
+      const [jobs, engineer, clock] = await Promise.all([getOpenJobs(), getEngineerState(), getCrewClock()])
+      setCrewClock(clock)
+      const [roles, slotsByJob] = await Promise.all([getJobRoles(jobs.map((j) => j.serRecId)), getMySlotsByJob()])
       const built = await Promise.all(
         jobs.map(async (job) => {
           const site = job.siteId != null ? await getSiteById(job.siteId) : null
           const customer = site?.custId != null ? await getCustomerById(site.custId) : null
-          return buildJobRow(job, site, customer)
+          return buildJobRow(job, site, customer, roles.get(job.serRecId) ?? 'lead', slotsByJob.get(job.serRecId) ?? [])
         }),
       )
       setRows(built)
@@ -217,7 +221,13 @@ export default function JobListPage() {
       : 'Pick dates'
 
   const openJob = (serRecId: number) => navigate(`/jobs/${serRecId}`)
-  const resumeJob = (serRecId: number) => navigate(wipPathFor(serRecId))
+  const resumeJob = (serRecId: number) => {
+    const row = rows.find((r) => r.job.serRecId === serRecId)
+    navigate(row?.role === 'crew' ? `/jobs/${serRecId}/crew` : wipPathFor(serRecId))
+  }
+  // A running/paused crew clock marks its job as "current" too, with its own badge text.
+  const activeJob = currentJob ?? crewClock?.serRecId ?? null
+  const activeLabel = currentJob ? undefined : crewClock?.status === 'in' ? 'Clocked in' : crewClock ? 'Paused' : undefined
 
   return (
     <IonPage>
@@ -328,8 +338,9 @@ export default function JobListPage() {
               <JobRowItem
                 key={row.job.serRecId}
                 row={row}
-                isCurrent={currentJob === row.job.serRecId}
+                isCurrent={activeJob === row.job.serRecId}
                 currentState={currentState}
+                currentLabel={activeLabel}
                 onOpen={openJob}
                 onResume={resumeJob}
               />
@@ -338,8 +349,9 @@ export default function JobListPage() {
         ) : (
           <JobCalendarView
             rows={filtered}
-            currentJob={currentJob}
+            currentJob={activeJob}
             currentState={currentState}
+            currentLabel={activeLabel}
             onOpen={openJob}
             onResume={resumeJob}
           />

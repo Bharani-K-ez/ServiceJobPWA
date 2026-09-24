@@ -8,6 +8,7 @@ import JobListPage from './screens/JobListPage'
 import JobDetailPage from './screens/JobDetailPage'
 import TeamPage from './screens/TeamPage'
 import WipPage from './screens/WipPage'
+import CrewWipPage from './screens/CrewWipPage'
 import AssetServiceListPage from './screens/AssetServiceListPage'
 import AssetServiceInfoPage from './screens/AssetServiceInfoPage'
 import DocumentFormPage from './screens/DocumentFormPage'
@@ -15,6 +16,8 @@ import UtilitiesPage from './screens/UtilitiesPage'
 import DevDbPage from './screens/DevDbPage'
 import FloatingMenu from './components/FloatingMenu'
 import StartupRedirect from './navigation/StartupRedirect'
+import PushNotificationsHost from './push/PushNotificationsHost'
+import AutoSyncHost from './sync/AutoSyncHost'
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { status } = useAuth()
@@ -106,6 +109,14 @@ function AppRoutes() {
           }
         />
         <Route
+          path="/jobs/:serRecId/crew"
+          element={
+            <RequireAuth>
+              <CrewWipPage />
+            </RequireAuth>
+          }
+        />
+        <Route
           path="/jobs/:serRecId/wip"
           element={
             <RequireAuth>
@@ -159,6 +170,8 @@ function AppRoutes() {
        * of the outlet so it floats over whichever page is showing. */}
       <FloatingMenu />
       <StartupRedirect />
+      <PushNotificationsHost />
+      <AutoSyncHost />
     </IonReactRouter>
   )
 }

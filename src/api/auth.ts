@@ -1,4 +1,5 @@
 import md5 from 'md5'
+import { getStoredDeviceToken } from '../push/pushNotifications'
 import axios from 'axios'
 import { httpClient } from './httpClient'
 import { setAuthToken, clearAuthToken } from './authToken'
@@ -79,10 +80,15 @@ export async function login({
   const isSavedAccount = !!saved && sameAccount(saved, account)
 
   try {
+    // Same as the MAUI LoginViewModel: send the FCM token (if the device
+    // has one yet) so the server stores it on EngineerPDA.DeviceToken and
+    // can push job notifications to this device.
+    const deviceToken = await getStoredDeviceToken()
     const body: LoginRequest = {
       username: trimmedUsername,
       password: passwordHash,
       code: trimmedCompanyCode,
+      ...(deviceToken ? { deviceToken } : {}),
     }
     const { data: result } = await httpClient.post<ApiResult<string>>(
       '/api/Account/Login',

@@ -1,4 +1,5 @@
 import type { LocalJob } from '../../db/localData'
+import type { JobRole, JobSlot } from '../../db/crew'
 
 /**
  * A job as the Jobs screen shows it: the ServiceRecord row plus the bits of
@@ -15,6 +16,12 @@ export interface JobRow {
   searchText: string
   /** Local calendar day ("YYYY-MM-DD") the job is planned for, or null if unscheduled. */
   scheduledDay: string | null
+  /** Every day the job is planned for - one per crew slot, else the single scheduledDay. */
+  scheduledDays: string[]
+  /** Lead (main job) or crew (time-sheet only) for the signed-in engineer. */
+  role: JobRole
+  /** The signed-in engineer's scheduled slots on this job (empty when not a crew-scheduled job). */
+  slots: JobSlot[]
 }
 
 export type DatePreset = 'all' | 'today' | 'week' | 'overdue' | 'unscheduled' | 'range'
@@ -70,29 +77,27 @@ export function matchesSearch(row: JobRow, query: string): boolean {
   return terms.every((t) => row.searchText.includes(t))
 }
 
+/** A job matches a date filter when ANY of its scheduled days does. */
 export function matchesDate(row: JobRow, filter: DateFilter, today = new Date()): boolean {
-  const day = row.scheduledDay
+  const days = row.scheduledDays
   const todayKey = toDayKey(today)
   switch (filter.preset) {
     case 'all':
       return true
     case 'unscheduled':
-      return day == null
+      return days.length === 0
     case 'today':
-      return day === todayKey
+      return days.includes(todayKey)
     case 'week': {
       const start = toDayKey(startOfWeek(today))
       const end = toDayKey(addDays(startOfWeek(today), 6))
-      return day != null && day >= start && day <= end
+      return days.some((d) => d >= start && d <= end)
     }
     case 'overdue':
-      return day != null && day < todayKey
-    case 'range': {
-      if (day == null) return false
-      if (filter.from && day < filter.from) return false
-      if (filter.to && day > filter.to) return false
-      return true
-    }
+      // Every slot is in the past and the job is still open.
+      return days.length > 0 && days.every((d) => d < todayKey)
+    case 'range':
+      return days.some((d) => (!filter.from || d >= filter.from) && (!filter.to || d <= filter.to))
   }
 }
 
@@ -105,6 +110,8 @@ export function buildJobRow(
   job: LocalJob,
   site: { occupant: string | null; siteRef: string | null; address: string | null; town: string | null; county: string | null; postCode: string | null } | null,
   customer: { organizationName: string | null; firstName: string | null; lastName: string | null } | null,
+  role: JobRole = 'lead',
+  slots: JobSlot[] = [],
 ): JobRow {
   const siteName = site?.occupant ?? site?.siteRef ?? ''
   const siteAddress = [site?.address, site?.town, site?.county, site?.postCode].filter(Boolean).join(', ')
@@ -128,5 +135,20 @@ export function buildJobRow(
     .join(' ')
     .toLowerCase()
 
-  return { job, siteName, siteAddress, customerName, searchText, scheduledDay: dayOf(plannedDate(job)) }
+  // Crew-scheduled jobs are planned per slot; anything else by ScheduledDate.
+  const slotDays = Array.from(new Set(slots.map((s) => dayOf(s.start)).filter((d): d is string => d != null))).sort()
+  const scheduledDay = slotDays[0] ?? dayOf(plannedDate(job))
+  const scheduledDays = slotDays.length > 0 ? slotDays : scheduledDay ? [scheduledDay] : []
+
+  return {
+    job,
+    siteName,
+    siteAddress,
+    customerName,
+    searchText: `${searchText} ${role}`,
+    scheduledDay,
+    scheduledDays,
+    role,
+    slots,
+  }
 }

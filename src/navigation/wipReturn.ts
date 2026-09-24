@@ -1,4 +1,5 @@
 import { getEngineerState } from '../db/jobState'
+import { getCrewClock } from '../db/crew'
 
 /**
  * Remembers where inside the WIP area the engineer last was, so "WIP" (the
@@ -14,7 +15,7 @@ import { getEngineerState } from '../db/jobState'
 
 const KEY = 'jobs.lastWipPath'
 
-const WIP_AREA = /^\/jobs\/(\d+)\/(wip|assets|documents|team)(\/|$)/
+const WIP_AREA = /^\/jobs\/(\d+)\/(wip|crew|assets|documents|team)(\/|$)/
 
 /** Called on every route change (FloatingMenu does this) - records WIP-area routes. */
 export function rememberWipPath(pathname: string, search: string): void {
@@ -59,9 +60,22 @@ export function clearWipPath(): void {
  */
 export async function startupPath(): Promise<string> {
   try {
-    const { currentJob } = await getEngineerState()
-    return currentJob ? wipPathFor(currentJob) : '/jobs'
+    const target = await activeWorkPath()
+    return target ?? '/jobs'
   } catch {
     return '/jobs'
   }
+}
+
+/**
+ * The WIP screen for whatever is recording time right now: the lead state
+ * machine's current job (main WIP area) first, else a crew clock that is
+ * running or paused (crew WIP). Null when nothing is under way.
+ */
+export async function activeWorkPath(): Promise<string | null> {
+  const { currentJob } = await getEngineerState()
+  if (currentJob) return wipPathFor(currentJob)
+  const clock = await getCrewClock()
+  if (clock) return `/jobs/${clock.serRecId}/crew`
+  return null
 }

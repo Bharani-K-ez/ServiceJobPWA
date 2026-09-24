@@ -22,4 +22,6 @@ export interface LoginRequest {
   password: string
   code: string
   userEmail?: string
+  /** FCM device token for push notifications - stored on EngineerPDA.DeviceToken, as the MAUI app does. */
+  deviceToken?: string
 }

@@ -47,6 +47,26 @@ const config: CapacitorConfig = {
     CapacitorHttp: {
       enabled: true,
     },
+    // iOS: show pushes that arrive while the app is in the foreground the
+    // same way as in the background (the MAUI app behaves like this).
+    PushNotifications: {
+      presentationOptions: ['badge', 'sound', 'alert'],
+    },
+    // Background sync heartbeat - see public/runners/sync-runner.js and
+    // src/sync/backgroundSync.ts. `interval` is the OS cadence in minutes
+    // (Android/WorkManager minimum is 15); the configured schedule
+    // (default every 20 min, Mon-Fri 08:00-18:00, changeable in Utilities)
+    // is applied inside the runner, which no-ops when it is not due or
+    // outside working hours. iOS treats this as a BGAppRefresh request -
+    // the system decides when it actually runs.
+    BackgroundRunner: {
+      label: 'com.ezmanagement.servicejobs.sync',
+      src: 'runners/sync-runner.js',
+      event: 'syncHeartbeat',
+      repeat: true,
+      interval: 15,
+      autoStart: true,
+    },
   },
 }
 

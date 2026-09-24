@@ -18,6 +18,10 @@ import {
 import type { SyncDownMode } from '../db/localData'
 import { describePushed, getLastSyncAt, pushPendingLocalChanges, syncDownAndStore } from '../db/localData'
 import { exportAndShareDiagnostics } from '../db/diagnostics'
+import { describeSchedule, getSyncSchedule, type SyncSchedule } from '../sync/syncSettings'
+import { getLastAutoSync, maybeAutoSync, type AutoSyncOutcome } from '../sync/autoSync'
+import { getLastBackgroundSync, isBackgroundRunnerAvailable, runHeartbeatNow, type BackgroundSyncResult } from '../sync/backgroundSync'
+import AutoSyncSettingsModal from './AutoSyncSettingsModal'
 import { useAuth } from '../auth/AuthContext'
 
 export default function UtilitiesPage() {
@@ -25,13 +29,43 @@ export default function UtilitiesPage() {
   const navigate = useNavigate()
 
   const [lastSyncAt, setLastSyncAt] = useState<string | null>(null)
+  const [schedule, setSchedule] = useState<SyncSchedule | null>(null)
+  const [lastAuto, setLastAuto] = useState<AutoSyncOutcome | null>(null)
+  const [lastBackground, setLastBackground] = useState<BackgroundSyncResult | null>(null)
+  const [scheduleOpen, setScheduleOpen] = useState(false)
   const [busyMessage, setBusyMessage] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
+  const loadStatus = async () => {
+    const [last, sched, auto, bg] = await Promise.all([getLastSyncAt(), getSyncSchedule(), getLastAutoSync(), getLastBackgroundSync()])
+    setLastSyncAt(last)
+    setSchedule(sched)
+    setLastAuto(auto)
+    setLastBackground(bg)
+  }
+
   useEffect(() => {
-    void getLastSyncAt().then(setLastSyncAt)
+    void loadStatus()
   }, [])
+
+  async function handleRunNow() {
+    setError(null)
+    setMessage(null)
+    setBusyMessage('Running automatic sync…')
+    try {
+      const outcome = await maybeAutoSync('timer', true)
+      if (outcome && !outcome.ok) setError(outcome.message)
+      else setMessage(outcome ? `Automatic sync: ${outcome.message}` : 'Nothing to do.')
+      if (isBackgroundRunnerAvailable()) {
+        const bg = await runHeartbeatNow()
+        if (bg) setMessage((m) => `${m ?? ''} Background heartbeat: ${bg.message}`.trim())
+      }
+      await loadStatus()
+    } finally {
+      setBusyMessage(null)
+    }
+  }
 
   /**
    * 'partial' (the everyday Sync item) pulls only what changed since the
@@ -65,7 +99,10 @@ export default function UtilitiesPage() {
       }
       setLastSyncAt(await getLastSyncAt())
       const sent = describePushed(pushResult.pushed)
-      setMessage(`${result.fullSync ? 'Full sync complete.' : 'Sync complete.'} ${sent ?? 'Nothing new to send'}.`)
+      setMessage(
+        `${result.fullSync ? 'Full sync complete.' : 'Sync complete.'} ${sent ?? 'Nothing new to send'}.` +
+          (result.crewClockClosed ? ' Your crew job was completed by the lead - your running time was clocked out.' : ''),
+      )
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not reach the server.')
     } finally {
@@ -133,6 +170,32 @@ export default function UtilitiesPage() {
             </IonLabel>
           </IonItem>
 
+          <IonItem button onClick={() => setScheduleOpen(true)}>
+            <IonLabel className="ion-text-wrap">
+              <h2>Automatic sync</h2>
+              <p>{schedule ? describeSchedule(schedule) : '…'}</p>
+              {lastAuto && (
+                <p>
+                  Last automatic sync {new Date(lastAuto.at).toLocaleString()} —{' '}
+                  <IonText color={lastAuto.ok ? 'success' : 'danger'}>{lastAuto.message}</IonText>
+                </p>
+              )}
+              {lastBackground && !lastBackground.skipped && (
+                <p>
+                  Last background sync {new Date(lastBackground.at).toLocaleString()} —{' '}
+                  <IonText color={lastBackground.ok ? 'success' : 'danger'}>{lastBackground.message}</IonText>
+                </p>
+              )}
+            </IonLabel>
+          </IonItem>
+
+          <IonItem button onClick={handleRunNow} detail={false}>
+            <IonLabel>
+              <h2>Run automatic sync now</h2>
+              <p>Same as the schedule would do - handy to check it works.</p>
+            </IonLabel>
+          </IonItem>
+
           <IonItem button onClick={handleDiagnostics}>
             <IonLabel>
               <h2>Send diagnostics</h2>
@@ -166,6 +229,14 @@ export default function UtilitiesPage() {
             <p className="ion-padding-start">{error}</p>
           </IonText>
         )}
+
+        <AutoSyncSettingsModal
+          isOpen={scheduleOpen}
+          onDismiss={(changed) => {
+            setScheduleOpen(false)
+            if (changed) void loadStatus()
+          }}
+        />
 
         <IonLoading isOpen={busyMessage !== null} message={busyMessage ?? undefined} />
       </IonContent>
