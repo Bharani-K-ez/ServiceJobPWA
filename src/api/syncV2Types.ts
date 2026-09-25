@@ -224,6 +224,8 @@ export interface SyncV2JobCrewDto {
   jobType: string | null
   newSerRecID: number | null
   splitIntoDaily: boolean
+  /** Equals engName when the engineer joined the crew themselves from Find Job. */
+  addedBy: string | null
 }
 
 /** Db.tblEmployeeTime for the engineer's jobs - SyncV2Response.EmployeeTime. */

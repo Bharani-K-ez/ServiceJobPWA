@@ -28,6 +28,8 @@ export interface JobSlot {
   start: string | null
   end: string | null
   jobType: string | null
+  /** The engineer added themselves from Find Job (AddedBy == EngName). */
+  selfJoined: boolean
 }
 
 export interface CrewMember {
@@ -104,13 +106,13 @@ export async function getJobSlots(serRecId: number, allEngineers = false): Promi
   const db = await getDb()
   const me = allEngineers ? null : await getCurrentUsername()
   const res = await db.query(
-    `SELECT ID, SerRecID, EngName, ScheduledStart, ScheduledEnd, JobType
+    `SELECT ID, SerRecID, EngName, ScheduledStart, ScheduledEnd, JobType, AddedBy
      FROM JobCrew WHERE SerRecID = ? AND NewSerRecID IS NULL ORDER BY ScheduledStart`,
     [serRecId],
   )
-  return rowsOf<{ ID: number; SerRecID: number; EngName: string; ScheduledStart: string | null; ScheduledEnd: string | null; JobType: string | null }>(res)
+  return rowsOf<{ ID: number; SerRecID: number; EngName: string; ScheduledStart: string | null; ScheduledEnd: string | null; JobType: string | null; AddedBy: string | null }>(res)
     .filter((r) => !me || sameName(r.EngName, me))
-    .map((r) => ({ id: r.ID, serRecId: r.SerRecID, engName: r.EngName, start: r.ScheduledStart, end: r.ScheduledEnd, jobType: r.JobType }))
+    .map((r) => ({ id: r.ID, serRecId: r.SerRecID, engName: r.EngName, start: r.ScheduledStart, end: r.ScheduledEnd, jobType: r.JobType, selfJoined: sameName(r.AddedBy, r.EngName) }))
 }
 
 /** All of the signed-in engineer's slots across every job - one query, for the list/calendar. */
@@ -120,13 +122,13 @@ export async function getMySlotsByJob(): Promise<Map<number, JobSlot[]>> {
   const out = new Map<number, JobSlot[]>()
   if (!me) return out
   const res = await db.query(
-    `SELECT ID, SerRecID, EngName, ScheduledStart, ScheduledEnd, JobType
+    `SELECT ID, SerRecID, EngName, ScheduledStart, ScheduledEnd, JobType, AddedBy
      FROM JobCrew WHERE NewSerRecID IS NULL AND lower(EngName) = lower(?) ORDER BY ScheduledStart`,
     [me],
   )
-  for (const r of rowsOf<{ ID: number; SerRecID: number; EngName: string; ScheduledStart: string | null; ScheduledEnd: string | null; JobType: string | null }>(res)) {
+  for (const r of rowsOf<{ ID: number; SerRecID: number; EngName: string; ScheduledStart: string | null; ScheduledEnd: string | null; JobType: string | null; AddedBy: string | null }>(res)) {
     const list = out.get(r.SerRecID) ?? []
-    list.push({ id: r.ID, serRecId: r.SerRecID, engName: r.EngName, start: r.ScheduledStart, end: r.ScheduledEnd, jobType: r.JobType })
+    list.push({ id: r.ID, serRecId: r.SerRecID, engName: r.EngName, start: r.ScheduledStart, end: r.ScheduledEnd, jobType: r.JobType, selfJoined: sameName(r.AddedBy, r.EngName) })
     out.set(r.SerRecID, list)
   }
   return out

@@ -22,6 +22,8 @@ export interface JobRow {
   role: JobRole
   /** The signed-in engineer's scheduled slots on this job (empty when not a crew-scheduled job). */
   slots: JobSlot[]
+  /** The engineer added themselves from Find Job (JobCrew.JobType "self") rather than being dispatched. */
+  selfJoined: boolean
 }
 
 export type DatePreset = 'all' | 'today' | 'week' | 'overdue' | 'unscheduled' | 'range'
@@ -150,5 +152,6 @@ export function buildJobRow(
     scheduledDays,
     role,
     slots,
+    selfJoined: role === 'crew' && slots.length > 0 && slots.every((s) => s.selfJoined),
   }
 }

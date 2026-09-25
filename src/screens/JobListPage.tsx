@@ -11,7 +11,9 @@ import {
   IonIcon,
   IonLabel,
   IonList,
+  IonListHeader,
   IonModal,
+  IonNote,
   IonPage,
   IonRefresher,
   IonRefresherContent,
@@ -228,6 +230,9 @@ export default function JobListPage() {
   // A running/paused crew clock marks its job as "current" too, with its own badge text.
   const activeJob = currentJob ?? crewClock?.serRecId ?? null
   const activeLabel = currentJob ? undefined : crewClock?.status === 'in' ? 'Clocked in' : crewClock ? 'Paused' : undefined
+  // The current job is running (lead states / crew clocked in) -> "Open";
+  // only a paused crew clock reads "Resume".
+  const actionLabel = !currentJob && crewClock?.status === 'paused' ? 'Resume' : 'Open'
 
   return (
     <IonPage>
@@ -334,17 +339,45 @@ export default function JobListPage() {
 
         {view === 'list' ? (
           <IonList>
-            {filtered.map((row) => (
-              <JobRowItem
-                key={row.job.serRecId}
-                row={row}
-                isCurrent={activeJob === row.job.serRecId}
-                currentState={currentState}
-                currentLabel={activeLabel}
-                onOpen={openJob}
-                onResume={resumeJob}
-              />
-            ))}
+            {filtered
+              .filter((row) => !row.selfJoined)
+              .map((row) => (
+                <JobRowItem
+                  key={row.job.serRecId}
+                  row={row}
+                  isCurrent={activeJob === row.job.serRecId}
+                  currentState={currentState}
+                  currentLabel={activeLabel}
+                  actionLabel={actionLabel}
+                  onOpen={openJob}
+                  onResume={resumeJob}
+                />
+              ))}
+            {filtered.some((row) => row.selfJoined) && (
+              <>
+                {/* Jobs the engineer joined from Find Job - someone else's
+                  * jobs they only log time against - kept apart from the
+                  * dispatched work above. */}
+                <IonListHeader>
+                  <IonLabel>Joined jobs</IonLabel>
+                  <IonNote style={{ paddingRight: 16 }}>time only</IonNote>
+                </IonListHeader>
+                {filtered
+                  .filter((row) => row.selfJoined)
+                  .map((row) => (
+                    <JobRowItem
+                      key={row.job.serRecId}
+                      row={row}
+                      isCurrent={activeJob === row.job.serRecId}
+                      currentState={currentState}
+                      currentLabel={activeLabel}
+                  actionLabel={actionLabel}
+                      onOpen={openJob}
+                      onResume={resumeJob}
+                    />
+                  ))}
+              </>
+            )}
           </IonList>
         ) : (
           <JobCalendarView
@@ -352,6 +385,7 @@ export default function JobListPage() {
             currentJob={activeJob}
             currentState={currentState}
             currentLabel={activeLabel}
+            actionLabel={actionLabel}
             onOpen={openJob}
             onResume={resumeJob}
           />

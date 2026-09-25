@@ -145,6 +145,9 @@ export default function JobDetailPage() {
                   {isCurrent && <IonBadge color="warning">Current job</IonBadge>}
                   {isPaused && !isCurrent && <IonBadge color="medium">Paused</IonBadge>}
                   {role === 'crew' && <IonBadge color="tertiary">Crew job</IonBadge>}
+                  {role === 'crew' && slots.length > 0 && slots.every((s) => s.selfJoined) && (
+                    <IonBadge color="medium">Joined</IonBadge>
+                  )}
                   {role === 'lead' && slots.length > 0 && <IonBadge color="success">Lead</IonBadge>}
                   {job.localStatus === 'completed' && <IonBadge color="success">Completed</IonBadge>}
                   {job.localStatus === 'declined' && <IonBadge color="danger">Declined</IonBadge>}

@@ -12,6 +12,7 @@ interface Props {
   currentJob: number | null
   currentState: JobState
   currentLabel?: string
+  actionLabel?: string
   onOpen: (serRecId: number) => void
   onResume: (serRecId: number) => void
 }
@@ -39,7 +40,7 @@ function shortDay(d: Date): string {
  *  Week  - Mon..Sun strip with a count per day; tap a day to see its agenda.
  *  Month - classic grid with a count bubble per day; tap a day for its agenda.
  */
-export default function JobCalendarView({ rows, currentJob, currentState, currentLabel, onOpen, onResume }: Props) {
+export default function JobCalendarView({ rows, currentJob, currentState, currentLabel, actionLabel, onOpen, onResume }: Props) {
   const [mode, setMode] = useState<CalendarMode>(() => {
     try {
       const saved = localStorage.getItem('jobs.calendarMode')
@@ -158,6 +159,7 @@ export default function JobCalendarView({ rows, currentJob, currentState, curren
             isCurrent={currentJob === row.job.serRecId}
             currentState={currentState}
             currentLabel={currentLabel}
+            actionLabel={actionLabel}
             onOpen={onOpen}
             onResume={onResume}
           />
@@ -179,6 +181,7 @@ export default function JobCalendarView({ rows, currentJob, currentState, curren
               isCurrent={currentJob === row.job.serRecId}
               currentState={currentState}
               currentLabel={currentLabel}
+              actionLabel={actionLabel}
               onOpen={onOpen}
               onResume={onResume}
             />

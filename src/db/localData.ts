@@ -573,9 +573,9 @@ export async function upsertSyncData(data: SyncV2ResponseDto): Promise<void> {
     if (crewRows.length > 0) {
       await db.executeSet(
         crewRows.map((c: SyncV2JobCrewDto) => ({
-          statement: `INSERT OR REPLACE INTO JobCrew (ID, SerRecID, EngName, ScheduledStart, ScheduledEnd, JobType, NewSerRecID, SplitIntoDaily)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          values: [c.iD, c.serRecID, c.engName, c.scheduledStart, c.scheduledEnd, c.jobType, c.newSerRecID, c.splitIntoDaily ? 1 : 0],
+          statement: `INSERT OR REPLACE INTO JobCrew (ID, SerRecID, EngName, ScheduledStart, ScheduledEnd, JobType, NewSerRecID, SplitIntoDaily, AddedBy)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          values: [c.iD, c.serRecID, c.engName, c.scheduledStart, c.scheduledEnd, c.jobType, c.newSerRecID, c.splitIntoDaily ? 1 : 0, c.addedBy ?? null],
         })),
         false,
       )

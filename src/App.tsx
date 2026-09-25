@@ -14,6 +14,7 @@ import AssetServiceInfoPage from './screens/AssetServiceInfoPage'
 import DocumentFormPage from './screens/DocumentFormPage'
 import UtilitiesPage from './screens/UtilitiesPage'
 import LeavePage from './screens/LeavePage'
+import FindJobPage from './screens/FindJobPage'
 import DevDbPage from './screens/DevDbPage'
 import FloatingMenu from './components/FloatingMenu'
 import StartupRedirect from './navigation/StartupRedirect'
@@ -146,6 +147,14 @@ function AppRoutes() {
           element={
             <RequireAuth>
               <DocumentFormPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/find-job"
+          element={
+            <RequireAuth>
+              <FindJobPage />
             </RequireAuth>
           }
         />

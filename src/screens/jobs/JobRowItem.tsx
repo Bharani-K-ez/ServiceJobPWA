@@ -1,5 +1,5 @@
 import { IonBadge, IonButton, IonIcon, IonItem, IonLabel, IonNote } from '@ionic/react'
-import { playOutline } from 'ionicons/icons'
+import { openOutline, playOutline } from 'ionicons/icons'
 import type { JobState } from '../../db/jobState'
 import { formatDate, formatTime } from '../../utils/format'
 import { formatSlots } from '../../utils/slots'
@@ -18,6 +18,8 @@ interface Props {
   currentState: JobState
   /** Overrides the "current" badge text (e.g. "Clocked in" for a crew job). */
   currentLabel?: string
+  /** Caption of the action button on the current job: "Open" while it is running, "Resume" when paused. */
+  actionLabel?: string
   /** Hide the date line (the calendar views already group by day). */
   compact?: boolean
   onOpen: (serRecId: number) => void
@@ -25,7 +27,7 @@ interface Props {
 }
 
 /** One job in the list / day agenda - tap for details, Resume on the current job. */
-export default function JobRowItem({ row, isCurrent, currentState, currentLabel, compact, onOpen, onResume }: Props) {
+export default function JobRowItem({ row, isCurrent, currentState, currentLabel, actionLabel, compact, onOpen, onResume }: Props) {
   const { job } = row
   const isPaused = job.localStatus === 'paused'
 
@@ -37,7 +39,10 @@ export default function JobRowItem({ row, isCurrent, currentState, currentLabel,
           {isCurrent && <IonBadge color="warning">{currentLabel ?? STATE_BADGE[currentState as JobState]}</IonBadge>}
           {isPaused && !isCurrent && <IonBadge color="medium">Paused</IonBadge>}
           {row.role === 'crew' ? (
-            <IonBadge color="tertiary">Crew</IonBadge>
+            <>
+              <IonBadge color="tertiary">Crew</IonBadge>
+              {row.selfJoined && <IonBadge color="medium">Joined</IonBadge>}
+            </>
           ) : (
             row.slots.length > 0 && <IonBadge color="success">Lead</IonBadge>
           )}
@@ -67,8 +72,8 @@ export default function JobRowItem({ row, isCurrent, currentState, currentLabel,
             onResume(job.serRecId)
           }}
         >
-          <IonIcon slot="start" icon={playOutline} />
-          Resume
+          <IonIcon slot="start" icon={actionLabel === 'Resume' ? playOutline : openOutline} />
+          {actionLabel ?? 'Open'}
         </IonButton>
       )}
     </IonItem>

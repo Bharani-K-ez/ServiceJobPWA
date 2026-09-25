@@ -233,7 +233,8 @@ export const SCHEMA_STATEMENTS: string[] = [
     ScheduledEnd TEXT,
     JobType TEXT,
     NewSerRecID INTEGER,
-    SplitIntoDaily INTEGER NOT NULL DEFAULT 0
+    SplitIntoDaily INTEGER NOT NULL DEFAULT 0,
+    AddedBy TEXT
   );`,
   `CREATE INDEX IF NOT EXISTS IX_JobCrew_SerRecID ON JobCrew (SerRecID);`,
   // Legacy TblLiveSync: one breadcrumb per state change / GPS fix / ETA save,
@@ -437,6 +438,7 @@ export const MIGRATION_STATEMENTS: string[] = [
   'DROP TABLE IF EXISTS customers',
   'DROP TABLE IF EXISTS assets',
   'ALTER TABLE asset_service_properties ADD COLUMN serviceFlag INTEGER NOT NULL DEFAULT 0',
+  'ALTER TABLE JobCrew ADD COLUMN AddedBy TEXT',
 ]
 
 export const DB_NAME = 'servicejobs'
